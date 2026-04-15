@@ -28,5 +28,8 @@ Thumbs.db
 # Output
 output/
 
+# Docs (internal design notes)
+docs/
+
 # uv
 uv.lock

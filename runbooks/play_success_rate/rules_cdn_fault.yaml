@@ -1,0 +1,85 @@
+# 场景规则：CDN 故障
+# 匹配条件基于 analysis_plan 中步骤的执行结果（从 Evidence Pool 取数据）
+
+scenario: cdn_fault
+display_name: "CDN故障"
+description: "CDN侧问题导致的播放成功率下降"
+
+# 该场景依赖的分析步骤（引用 analysis_plan 中的 step id）
+required_evidence:
+  - overall_trend
+  - check_cdn_error
+  - drill_isp
+  - drill_region
+  - gini_isp
+  - gini_region
+  - check_changes
+
+# 匹配规则（按优先级排列）
+# 每条规则的 conditions 为 AND 关系，多条规则之间为 OR 关系
+rules:
+  - id: cdn_regional_fault
+    name: "区域性CDN节点故障"
+    conditions:
+      - step: check_cdn_error
+        field: rate_of_change
+        op: ">"
+        value: 0.2
+        description: "CDN错误率较基线上升超过20%"
+      - step: gini_region
+        field: gini
+        op: ">"
+        value: 0.7
+        description: "地区维度高度集中"
+      - step: drill_region
+        field: top1_contribution
+        op: ">"
+        value: 0.5
+        description: "单一地区贡献超过50%的异常"
+    confidence: high
+    conclusion: "CDN区域节点故障，问题高度集中在特定地区的CDN节点"
+    suggested_action: "联系CDN运维检查异常地区节点状态，考虑临时切换CDN调度"
+
+  - id: cdn_isp_fault
+    name: "运营商链路CDN故障"
+    conditions:
+      - step: check_cdn_error
+        field: rate_of_change
+        op: ">"
+        value: 0.2
+        description: "CDN错误率较基线上升超过20%"
+      - step: gini_isp
+        field: gini
+        op: ">"
+        value: 0.7
+        description: "运营商维度高度集中"
+      - step: drill_isp
+        field: top1_contribution
+        op: ">"
+        value: 0.5
+        description: "单一运营商贡献超过50%的异常"
+    confidence: high
+    conclusion: "CDN到特定运营商的链路异常，可能是回源链路或边缘节点问题"
+    suggested_action: "检查CDN到该运营商的回源链路，联系运营商确认网络状况"
+
+  - id: cdn_general_degradation
+    name: "CDN整体质量下降"
+    conditions:
+      - step: check_cdn_error
+        field: rate_of_change
+        op: ">"
+        value: 0.15
+        description: "CDN错误率较基线上升超过15%"
+      - step: gini_region
+        field: gini
+        op: "<"
+        value: 0.4
+        description: "地区维度分散（非集中性问题）"
+      - step: gini_isp
+        field: gini
+        op: "<"
+        value: 0.4
+        description: "运营商维度也分散"
+    confidence: medium
+    conclusion: "CDN整体质量下降，非集中性问题，可能是CDN厂商侧全局性故障"
+    suggested_action: "检查CDN厂商侧是否有全局性问题，考虑切换备用CDN"

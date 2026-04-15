@@ -1,0 +1,9 @@
+metric: play_success_rate
+display_name: "播放成功率"
+description: "播放成功率相关归因场景集合"
+related_metrics:
+  - cdn_error_rate
+  - player_error_rate
+  - buffering_rate
+  - network_quality
+owner: "视频质量团队"

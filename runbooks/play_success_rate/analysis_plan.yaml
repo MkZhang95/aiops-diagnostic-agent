@@ -1,0 +1,160 @@
+# 播放成功率 — 统一采集计划
+# 所有场景需要的分析步骤在此统一定义（已去重）
+# 各场景规则文件通过引用 step id 从 Evidence Pool 取结果
+
+metric: play_success_rate
+display_name: "播放成功率"
+
+steps:
+  # ======== 整体趋势 ========
+  - id: overall_trend
+    name: "查看播放成功率整体趋势"
+    priority: must
+    action: query_metrics
+    params:
+      metric: play_success_rate
+    depends_on: []
+    used_by: [cdn_fault, isp_fault, client_bug, network_issue]
+    description: "查询播放成功率时序数据，确认是否真的存在异常下降"
+
+  # ======== 关联指标查询（与整体趋势无依赖，可并发） ========
+  - id: check_cdn_error
+    name: "查询CDN错误率"
+    priority: must
+    action: query_metrics
+    params:
+      metric: cdn_error_rate
+    depends_on: []
+    used_by: [cdn_fault]
+    description: "查询CDN错误率趋势，判断是否存在CDN侧异常"
+
+  - id: check_player_error
+    name: "查询播放器错误率"
+    priority: must
+    action: query_metrics
+    params:
+      metric: player_error_rate
+    depends_on: []
+    used_by: [client_bug]
+    description: "查询播放器错误率，判断是否存在客户端侧异常"
+
+  - id: check_network_quality
+    name: "查询网络质量指标"
+    priority: should
+    action: query_metrics
+    params:
+      metric: network_quality
+    depends_on: []
+    used_by: [network_issue, isp_fault]
+    description: "查询网络质量指标，辅助判断是否为网络侧问题"
+
+  - id: check_changes
+    name: "查询变更事件"
+    priority: must
+    action: check_changes
+    params: {}
+    depends_on: []
+    used_by: [cdn_fault, isp_fault, client_bug, network_issue]
+    description: "检查时间窗口内是否有相关变更（发版、配置变更、CDN切换等）"
+
+  # ======== 维度下钻（依赖整体趋势确认异常后执行） ========
+  - id: drill_isp
+    name: "按运营商维度下钻"
+    priority: must
+    action: drill_down
+    params:
+      metric: play_success_rate
+      dimension: isp
+    depends_on: [overall_trend]
+    used_by: [cdn_fault, isp_fault, network_issue]
+    description: "按运营商维度拆解播放成功率，查看问题是否集中在某个运营商"
+
+  - id: drill_region
+    name: "按地区维度下钻"
+    priority: must
+    action: drill_down
+    params:
+      metric: play_success_rate
+      dimension: region
+    depends_on: [overall_trend]
+    used_by: [cdn_fault, isp_fault, network_issue]
+    description: "按地区维度拆解播放成功率，查看问题是否集中在某个地区"
+
+  - id: drill_app_version
+    name: "按客户端版本下钻"
+    priority: must
+    action: drill_down
+    params:
+      metric: play_success_rate
+      dimension: app_version
+    depends_on: [overall_trend]
+    used_by: [client_bug]
+    description: "按APP版本维度拆解，查看问题是否集中在某个版本"
+
+  - id: drill_os
+    name: "按操作系统下钻"
+    priority: should
+    action: drill_down
+    params:
+      metric: play_success_rate
+      dimension: os
+    depends_on: [overall_trend]
+    used_by: [client_bug]
+    description: "按操作系统维度拆解，辅助判断是否与特定平台相关"
+
+  # ======== 集中度分析（依赖下钻结果） ========
+  - id: gini_isp
+    name: "运营商维度集中度分析"
+    priority: must
+    action: analyze_concentration
+    params:
+      metric: play_success_rate
+      dimension: isp
+    depends_on: [drill_isp]
+    used_by: [cdn_fault, isp_fault]
+    description: "计算运营商维度GINI系数，判断问题集中度"
+
+  - id: gini_region
+    name: "地区维度集中度分析"
+    priority: must
+    action: analyze_concentration
+    params:
+      metric: play_success_rate
+      dimension: region
+    depends_on: [drill_region]
+    used_by: [cdn_fault, network_issue]
+    description: "计算地区维度GINI系数，判断问题是否集中在少数地区"
+
+  # ======== 贡献度分解（依赖下钻结果） ========
+  - id: contribution_isp
+    name: "运营商贡献度分解"
+    priority: should
+    action: analyze_contribution
+    params:
+      metric: play_success_rate
+      dimension: isp
+    depends_on: [drill_isp]
+    used_by: [cdn_fault, isp_fault]
+    description: "量化各运营商对播放成功率变化的贡献度"
+
+  - id: contribution_region
+    name: "地区贡献度分解"
+    priority: should
+    action: analyze_contribution
+    params:
+      metric: play_success_rate
+      dimension: region
+    depends_on: [drill_region]
+    used_by: [cdn_fault, network_issue]
+    description: "量化各地区对播放成功率变化的贡献度"
+
+  # ======== 日志查询 ========
+  - id: search_error_logs
+    name: "查询错误日志"
+    priority: should
+    action: search_logs
+    params:
+      keyword: "error"
+    depends_on: []
+    used_by: [cdn_fault, client_bug]
+    description: "搜索相关错误日志，寻找具体报错信息辅助定位"

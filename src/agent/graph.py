@@ -1,94 +1,120 @@
-"""LangGraph StateGraph definition for the diagnostic agent."""
+"""Agent Graph 定义 — Phase 2 版本
 
-from langchain_core.messages import AIMessage
+两阶段架构:
+  Phase 1 (采集): init_plan → analyze_alert → agent_node ⇄ tool_node
+                  → update_checklist → verify_completeness
+  Phase 2 (匹配): match_scenarios → generate_report → END
+"""
+
+from __future__ import annotations
+
 from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
-from .nodes import (
-    make_agent_node,
+from src.agent.nodes import (
     make_analyze_alert,
-    make_evaluate_result,
+    make_agent_node,
     make_generate_report,
+    make_init_plan,
+    make_match_scenarios,
+    update_checklist,
+    verify_completeness,
 )
-from .state import AgentState
+from src.agent.state import AgentState
 
 
-def _should_continue_after_agent(state: AgentState) -> str:
-    """Route after agent node: tool call or evaluate."""
-    messages = state.get("messages", [])
-    if not messages:
-        return "evaluate_result"
-
-    last_message = messages[-1]
-    if isinstance(last_message, AIMessage) and getattr(last_message, "tool_calls", None):
-        return "tool_node"
-
-    return "evaluate_result"
-
-
-def _should_continue_after_evaluate(state: AgentState) -> str:
-    """Route after evaluate: continue or generate report."""
-    status = state.get("status", "running")
-    if status in ("completed", "max_steps_reached", "failed"):
-        return "generate_report"
-    return "agent_node"
-
-
-def build_graph(llm, tools: list | None = None):
-    """Build the diagnostic agent LangGraph.
+def build_graph(llm, tools, runbook_dir: str = "runbooks"):
+    """构建 Agent 执行图
 
     Args:
-        llm: BaseLLM instance
-        tools: List of LangChain tools. If None, builds a minimal graph without tool calling.
+        llm: LLM 实例（BaseLLM 子类）
+        tools: 工具列表
+        runbook_dir: Runbook 目录路径
 
     Returns:
-        Compiled LangGraph
+        编译后的 LangGraph 图
     """
-    chat_model = llm.get_chat_model()
-
-    if tools:
-        llm_with_tools = chat_model.bind_tools(tools)
-        tool_node = ToolNode(tools)
-    else:
-        llm_with_tools = chat_model
-        tool_node = None
-
-    # Create node functions
-    analyze_alert = make_analyze_alert(llm_with_tools)
-    agent_node = make_agent_node(llm_with_tools)
-    evaluate_result = make_evaluate_result()
-    generate_report = make_generate_report(chat_model)  # report uses raw LLM, no tools
-
-    # Build graph
     graph = StateGraph(AgentState)
 
-    graph.add_node("analyze_alert", analyze_alert)
-    graph.add_node("agent_node", agent_node)
-    graph.add_node("evaluate_result", evaluate_result)
-    graph.add_node("generate_report", generate_report)
+    # ---- Phase 1: 数据采集 ----
+    graph.add_node("init_plan", make_init_plan(runbook_dir))
+    graph.add_node("analyze_alert", make_analyze_alert(llm))
+    graph.add_node("agent_node", make_agent_node(llm, tools))
+    graph.add_node("tool_node", ToolNode(tools))
+    graph.add_node("update_checklist", update_checklist)
+    graph.add_node("verify_completeness", verify_completeness)
 
-    if tool_node:
-        graph.add_node("tool_node", tool_node)
+    # ---- Phase 2: 场景匹配 + 报告 ----
+    graph.add_node("match_scenarios", make_match_scenarios(runbook_dir))
+    graph.add_node("generate_report", make_generate_report(llm))
 
-    # Edges
-    graph.set_entry_point("analyze_alert")
+    # ---- 连线 ----
+    graph.set_entry_point("init_plan")
+    graph.add_edge("init_plan", "analyze_alert")
     graph.add_edge("analyze_alert", "agent_node")
 
-    if tool_node:
-        graph.add_conditional_edges(
-            "agent_node",
-            _should_continue_after_agent,
-            {"tool_node": "tool_node", "evaluate_result": "evaluate_result"},
-        )
-        graph.add_edge("tool_node", "agent_node")
-    else:
-        graph.add_edge("agent_node", "evaluate_result")
-
+    # agent_node 之后：有工具调用 → tool_node，否则 → verify_completeness
     graph.add_conditional_edges(
-        "evaluate_result",
-        _should_continue_after_evaluate,
-        {"agent_node": "agent_node", "generate_report": "generate_report"},
+        "agent_node",
+        _route_after_agent,
+        {
+            "tool_node": "tool_node",
+            "verify_completeness": "verify_completeness",
+        },
     )
+
+    # tool_node 执行完 → update_checklist
+    graph.add_edge("tool_node", "update_checklist")
+
+    # update_checklist → 回到 agent_node 继续
+    graph.add_edge("update_checklist", "agent_node")
+
+    # verify_completeness 之后：有遗漏 → agent_node，完成 → match_scenarios
+    graph.add_conditional_edges(
+        "verify_completeness",
+        _route_after_verify,
+        {
+            "agent_node": "agent_node",
+            "match_scenarios": "match_scenarios",
+        },
+    )
+
+    # Phase 2 线性流程
+    graph.add_edge("match_scenarios", "generate_report")
     graph.add_edge("generate_report", END)
 
     return graph.compile()
+
+
+# ============================================================
+# 路由函数
+# ============================================================
+
+
+def _route_after_agent(state: dict) -> str:
+    """agent_node 之后的路由
+
+    - 如果最后一条 AI 消息包含 tool_calls → 执行工具
+    - 否则 → 进入完整性验证
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return "verify_completeness"
+
+    last_msg = messages[-1]
+    if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
+        return "tool_node"
+
+    return "verify_completeness"
+
+
+def _route_after_verify(state: dict) -> str:
+    """verify_completeness 之后的路由
+
+    - iteration == -1: 全部完成，进入场景匹配
+    - iteration >= 0: 有遗漏，回到 agent_node
+    """
+    iteration = state.get("iteration", 0)
+    if iteration == -1:
+        return "match_scenarios"
+    return "agent_node"

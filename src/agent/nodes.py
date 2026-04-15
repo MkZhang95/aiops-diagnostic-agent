@@ -1,142 +1,524 @@
-"""Agent graph node functions."""
+"""Agent 节点定义 — Phase 2 版本
+
+两阶段架构:
+  Phase 1 (采集): init_plan → agent_node → tool_node → update_checklist → verify_completeness
+  Phase 2 (匹配): match_scenarios → generate_report
+"""
+
+from __future__ import annotations
 
 import json
+from datetime import datetime
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-from rich.console import Console
 
-from .prompts import REPORT_PROMPT, SYSTEM_PROMPT
-from .state import AgentState
-
-console = Console()
-
-# Minimum number of tool calls before allowing conclusion
-MIN_TOOL_CALLS = 3
+from src.agent.prompts import REPORT_PROMPT, SYSTEM_PROMPT
+from src.knowledge.rule_matcher import RuleMatcher
+from src.knowledge.runbook_loader import ChecklistItem, RunbookLoader
 
 
-def _count_tool_calls(messages: list) -> int:
-    """Count how many tool calls have been made so far."""
-    count = 0
-    for msg in messages:
-        if isinstance(msg, AIMessage) and getattr(msg, "tool_calls", None):
-            count += len(msg.tool_calls)
-    return count
+# ============================================================
+# Phase 1: 数据采集节点
+# ============================================================
 
 
-def make_analyze_alert(llm_with_tools):
-    """Create the analyze_alert node with LLM bound."""
+def make_init_plan(runbook_dir: str = "runbooks"):
+    """创建 init_plan 节点工厂
 
-    def analyze_alert(state: AgentState) -> dict:
-        """分析告警上下文，规划诊断方向."""
+    功能：解析 analysis_plan.yaml → 生成 Checklist → 写入 State
+    这是一个程序化节点，不涉及 LLM 调用。
+    """
+    loader = RunbookLoader(runbook_dir)
+
+    def init_plan(state: dict) -> dict:
         alert = state["alert"]
-        console.print("\n[bold yellow][Step 0] 🚨 分析告警信息[/bold yellow]")
-        console.print(f"  告警: {alert.get('description', alert.get('metric_name', 'unknown'))}")
+        metric = alert.metric_name
 
-        alert_text = (
-            f"收到一条告警事件，请立即开始诊断。\n\n"
-            f"告警详情：\n"
-            f"```json\n{json.dumps(alert, ensure_ascii=False, indent=2)}\n```\n\n"
-            f"第一步：请调用 query_metrics 工具查询指标 {alert.get('metric_name', '')} 的数据。"
-        )
+        # 加载采集计划
+        checklist_items = loader.load_analysis_plan(metric)
 
-        messages = [
-            SystemMessage(content=SYSTEM_PROMPT),
-            HumanMessage(content=alert_text),
+        if not checklist_items:
+            # 没有预定义的 runbook，返回空 checklist，Agent 自由推理
+            return {
+                "checklist": [],
+                "evidence_pool": {},
+                "matched_scenarios": [],
+                "iteration": 0,
+            }
+
+        # 转为 dict 存入 State
+        checklist = [
+            {
+                "id": item.id,
+                "name": item.name,
+                "priority": item.priority,
+                "action": item.action,
+                "params": item.params,
+                "depends_on": item.depends_on,
+                "description": item.description,
+                "status": "pending",
+            }
+            for item in checklist_items
         ]
 
-        response = llm_with_tools.invoke(messages)
-
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_name = response.tool_calls[0]["name"]
-            console.print(f"  → 调用工具: [green]{tool_name}[/green]")
+        # 生成初始引导消息
+        meta = loader.load_meta(metric)
+        metric_display = meta.display_name if meta else metric
+        intro = (
+            f"已加载 **{metric_display}** 的归因分析计划，"
+            f"共 {len(checklist)} 个分析步骤 "
+            f"(其中 {sum(1 for c in checklist if c['priority'] == 'must')} 个必要步骤)。"
+        )
 
         return {
-            "messages": [SystemMessage(content=SYSTEM_PROMPT), HumanMessage(content=alert_text), response],
-            "current_step": 1,
-            "status": "running",
-            "evidence": [],
-            "root_causes": [],
+            "messages": [SystemMessage(content=intro)],
+            "checklist": checklist,
+            "evidence_pool": {},
+            "matched_scenarios": [],
+            "iteration": 0,
+        }
+
+    return init_plan
+
+
+def make_analyze_alert(llm):
+    """创建 analyze_alert 节点 — 分析告警并启动归因
+
+    修复 Phase 1 的 SystemMessage 重复问题：
+    SystemMessage 只在这里设置一次，后续节点不再重复注入。
+    """
+    loader = RunbookLoader()
+
+    def analyze_alert(state: dict) -> dict:
+        alert = state["alert"]
+        checklist = state.get("checklist", [])
+
+        # 构建 System Prompt（包含 Checklist）
+        checklist_text = ""
+        if checklist:
+            items = [
+                ChecklistItem(
+                    id=c["id"],
+                    name=c["name"],
+                    priority=c["priority"],
+                    action=c["action"],
+                    params=c.get("params", {}),
+                    depends_on=c.get("depends_on", []),
+                    description=c.get("description", ""),
+                    status=c.get("status", "pending"),
+                )
+                for c in checklist
+            ]
+            checklist_text = "\n\n" + loader.format_checklist_status(items)
+
+        system_content = SYSTEM_PROMPT + checklist_text
+
+        # 告警描述
+        alert_desc = (
+            f"## 告警信息\n\n"
+            f"- **告警ID**: {alert.alert_id}\n"
+            f"- **指标**: {alert.metric_name}\n"
+            f"- **级别**: {alert.severity}\n"
+            f"- **描述**: {alert.description}\n"
+            f"- **当前值**: {alert.current_value}\n"
+            f"- **基线值**: {alert.baseline_value}\n"
+            f"- **时间**: {alert.timestamp}\n"
+        )
+
+        return {
+            "messages": [
+                SystemMessage(content=system_content),
+                HumanMessage(content=alert_desc),
+            ],
         }
 
     return analyze_alert
 
 
-def make_agent_node(llm_with_tools):
-    """Create the agent node that decides tool calls."""
+def make_agent_node(llm, tools):
+    """创建 agent_node 节点 — LLM 根据 Checklist 调用工具
 
-    def agent_node(state: AgentState) -> dict:
-        """Agent 推理节点：根据当前状态决定调用工具或给出结论."""
-        step = state.get("current_step", 0)
-        console.print(f"\n[bold cyan][Step {step}] 🤔 Agent 推理中...[/bold cyan]")
+    每次执行时动态更新 Checklist 状态到 Prompt 中，
+    提示可并行执行的步骤。
+    """
+    model = llm.get_chat_model().bind_tools(tools)
+    loader = RunbookLoader()
 
-        messages = list(state["messages"])
+    def agent_node(state: dict) -> dict:
+        checklist = state.get("checklist", [])
+        iteration = state.get("iteration", 0)
 
-        # If too few tool calls, nudge the agent to keep investigating
-        tool_count = _count_tool_calls(messages)
-        if tool_count < MIN_TOOL_CALLS:
-            nudge = (
-                "你还没有收集到足够的证据。"
-                "请继续调用工具进行分析（维度下钻、贡献度计算、日志搜索、变更事件检查等）。"
-                "至少需要使用 3 个不同的工具才能得出可靠结论。"
+        # 如果有 checklist，动态构建当前状态提示
+        if checklist:
+            items = [
+                ChecklistItem(
+                    id=c["id"],
+                    name=c["name"],
+                    priority=c["priority"],
+                    action=c["action"],
+                    params=c.get("params", {}),
+                    depends_on=c.get("depends_on", []),
+                    description=c.get("description", ""),
+                    status=c.get("status", "pending"),
+                )
+                for c in checklist
+            ]
+            checklist_status = loader.format_checklist_status(items)
+
+            # 注入 checklist 状态作为系统提示
+            checklist_msg = SystemMessage(
+                content=(
+                    f"--- 当前分析进度 (第 {iteration + 1} 轮) ---\n\n"
+                    f"{checklist_status}\n\n"
+                    "请严格按照清单执行分析，优先完成所有 MUST 级别步骤。\n"
+                    "每一步先输出 **Thought:** （你的推理过程），再执行工具调用。\n"
+                    "当多个步骤可并行时，在一次响应中同时调用多个工具。"
+                )
             )
-            messages.append(HumanMessage(content=nudge))
-
-        response = llm_with_tools.invoke(messages)
-
-        if hasattr(response, "tool_calls") and response.tool_calls:
-            tool_name = response.tool_calls[0]["name"]
-            console.print(f"  → 调用工具: [green]{tool_name}[/green]")
+            messages = state["messages"] + [checklist_msg]
         else:
-            console.print("  → Agent 认为已收集足够证据，准备总结")
+            messages = state["messages"]
+
+        # 调用 LLM
+        response = model.invoke(messages)
 
         return {
             "messages": [response],
-            "current_step": step + 1,
+            "iteration": iteration + 1,
         }
 
     return agent_node
 
 
-def make_evaluate_result():
-    """Create the evaluate_result node."""
+def update_checklist(state: dict) -> dict:
+    """更新 Checklist 状态 + 写入 Evidence Pool
 
-    def evaluate_result(state: AgentState) -> dict:
-        """评估当前诊断进度，决定继续还是结束."""
-        step = state.get("current_step", 0)
-        max_steps = state.get("max_steps", 15)
+    这是一个程序化节点（不调用 LLM），功能：
+    1. 从最近的消息中提取 tool_calls 和 tool 返回结果
+    2. 匹配 checklist 中的步骤，标记为 done
+    3. 将工具返回结果写入 evidence_pool（共享结果池）
+    """
+    checklist = state.get("checklist", [])
+    evidence_pool = state.get("evidence_pool", {})
 
-        if step >= max_steps:
-            console.print(f"\n[bold red]⚠ 达到最大步骤数 ({max_steps})，结束诊断[/bold red]")
-            return {"status": "max_steps_reached"}
+    if not checklist:
+        return {}
 
-        # Check if enough tools have been called
-        tool_count = _count_tool_calls(state.get("messages", []))
-        if tool_count < MIN_TOOL_CALLS:
-            console.print(f"  → 已调用 {tool_count} 个工具，继续收集证据...")
-            return {"status": "running"}
+    # 提取最近一轮的 tool 调用和结果
+    tool_calls_info = _extract_recent_tool_info(state["messages"])
 
-        console.print(f"  → 已调用 {tool_count} 个工具，证据充分，准备生成报告")
-        return {"status": "completed"}
+    for item in checklist:
+        if item["status"] == "done":
+            continue
 
-    return evaluate_result
+        for tc_name, tc_args, tc_result in tool_calls_info:
+            if _matches_step(tc_name, tc_args, item):
+                item["status"] = "done"
+
+                # 结果写入 Evidence Pool
+                evidence_pool[item["id"]] = {
+                    "tool": tc_name,
+                    "args": tc_args,
+                    "result": tc_result,
+                    "parsed": _parse_tool_result(tc_result),
+                    "timestamp": datetime.now().isoformat(),
+                }
+                break
+
+    return {
+        "checklist": checklist,
+        "evidence_pool": evidence_pool,
+    }
+
+
+def verify_completeness(state: dict) -> dict:
+    """验证必要步骤是否全部完成
+
+    程序化节点，返回的 iteration 值用于路由判断：
+    - iteration = -1: 全部 must 步骤完成，可进入 Phase 2
+    - iteration >= 0: 有遗漏，回到 agent_node 继续
+    """
+    checklist = state.get("checklist", [])
+    iteration = state.get("iteration", 0)
+
+    if not checklist:
+        # 没有 checklist（自由推理模式），检查是否有足够工具调用
+        tool_count = sum(
+            1
+            for msg in state["messages"]
+            if hasattr(msg, "tool_calls") and msg.tool_calls
+        )
+        if tool_count >= 3:
+            return {"iteration": -1}
+        return {"iteration": iteration}
+
+    pending_must = [
+        item for item in checklist if item["priority"] == "must" and item["status"] == "pending"
+    ]
+
+    if not pending_must:
+        # 所有 must 步骤完成
+        return {"iteration": -1}
+
+    # 防止无限循环：最多重试 3 次
+    if iteration >= 10:
+        return {"iteration": -1}
+
+    # 有遗漏，构造提醒消息
+    loader = RunbookLoader()
+    items = [
+        ChecklistItem(
+            id=c["id"],
+            name=c["name"],
+            priority=c["priority"],
+            action=c["action"],
+            params=c.get("params", {}),
+            depends_on=c.get("depends_on", []),
+            description=c.get("description", ""),
+            status=c.get("status", "pending"),
+        )
+        for c in checklist
+    ]
+    reminder = loader.format_pending_must_reminder(items)
+
+    return {
+        "messages": [SystemMessage(content=reminder)],
+        "iteration": iteration,
+    }
+
+
+# ============================================================
+# Phase 2: 场景匹配 + 报告生成
+# ============================================================
+
+
+def make_match_scenarios(runbook_dir: str = "runbooks"):
+    """创建 match_scenarios 节点 — 程序化场景规则匹配"""
+    matcher = RuleMatcher(runbook_dir)
+
+    def match_scenarios(state: dict) -> dict:
+        alert = state["alert"]
+        evidence_pool = state.get("evidence_pool", {})
+
+        matched = matcher.match_all_scenarios(alert.metric_name, evidence_pool)
+
+        # 转为 dict 存入 State
+        matched_dicts = [
+            {
+                "scenario": r.scenario,
+                "scenario_name": r.scenario_name,
+                "rule_id": r.rule_id,
+                "rule_name": r.rule_name,
+                "confidence": r.confidence,
+                "conclusion": r.conclusion,
+                "suggested_action": r.suggested_action,
+                "match_score": r.match_score,
+                "matched_conditions": r.matched_conditions,
+                "unmatched_conditions": r.unmatched_conditions,
+            }
+            for r in matched
+        ]
+
+        # 格式化匹配结果注入消息
+        match_text = matcher.format_match_results(matched)
+        return {
+            "matched_scenarios": matched_dicts,
+            "messages": [SystemMessage(content=match_text)],
+        }
+
+    return match_scenarios
 
 
 def make_generate_report(llm):
-    """Create the generate_report node with raw LLM (no tools)."""
+    """创建 generate_report 节点 — LLM 生成归因报告"""
+    model = llm.get_chat_model()
 
-    def generate_report(state: AgentState) -> dict:
-        """生成最终归因诊断报告."""
-        console.print("\n[bold green]📋 生成归因诊断报告...[/bold green]")
+    def generate_report(state: dict) -> dict:
+        alert = state["alert"]
+        evidence_pool = state.get("evidence_pool", {})
+        matched_scenarios = state.get("matched_scenarios", [])
 
-        messages = state["messages"] + [HumanMessage(content=REPORT_PROMPT)]
-        response = llm.invoke(messages)
+        # 构建报告生成 Prompt
+        evidence_summary = _format_evidence_summary(evidence_pool)
+        scenario_summary = _format_scenario_summary(matched_scenarios)
 
-        report = response.content
-        console.print("\n[bold green]✅ 诊断完成[/bold green]")
+        report_prompt = REPORT_PROMPT.format(
+            alert_id=alert.alert_id,
+            metric_name=alert.metric_name,
+            description=alert.description,
+            current_value=alert.current_value,
+            baseline_value=alert.baseline_value,
+            evidence_summary=evidence_summary,
+            scenario_summary=scenario_summary,
+        )
 
-        return {
-            "report": report,
-            "status": "completed",
-        }
+        response = model.invoke(
+            [
+                SystemMessage(content="你是一个 AIOps 归因分析报告撰写专家。"),
+                HumanMessage(content=report_prompt),
+            ]
+        )
+
+        return {"messages": [response]}
 
     return generate_report
+
+
+# ============================================================
+# 辅助函数
+# ============================================================
+
+
+def _extract_recent_tool_info(
+    messages: list,
+) -> list[tuple[str, dict, str]]:
+    """从消息列表中提取最近一轮的工具调用信息
+
+    Returns:
+        [(tool_name, tool_args, tool_result), ...]
+    """
+    results = []
+
+    # 从后往前找最近的 AI message (with tool_calls) 和对应的 tool results
+    tool_results_map: dict[str, str] = {}
+    tool_calls_list: list[tuple[str, dict, str]] = []
+
+    for msg in reversed(messages):
+        # ToolMessage: 工具返回结果
+        if msg.type == "tool":
+            tool_results_map[msg.tool_call_id] = msg.content
+
+        # AIMessage with tool_calls: 工具调用请求
+        elif msg.type == "ai" and hasattr(msg, "tool_calls") and msg.tool_calls:
+            for tc in msg.tool_calls:
+                tc_id = tc.get("id", "")
+                tc_name = tc.get("name", "")
+                tc_args = tc.get("args", {})
+                tc_result = tool_results_map.get(tc_id, "")
+                results.append((tc_name, tc_args, tc_result))
+            break  # 只处理最近一轮
+
+    return results
+
+
+def _matches_step(tool_name: str, tool_args: dict, step: dict) -> bool:
+    """检查一次工具调用是否匹配 checklist 中的某个步骤
+
+    匹配逻辑：
+    1. 工具名称必须匹配
+    2. step 中定义的 params 的每个 key-value 都必须在 tool_args 中出现
+    """
+    if tool_name != step["action"]:
+        return False
+
+    step_params = step.get("params", {})
+    for key, value in step_params.items():
+        if str(tool_args.get(key, "")) != str(value):
+            return False
+
+    return True
+
+
+def _parse_tool_result(result_str: str) -> dict:
+    """尝试从工具返回结果中解析结构化数据
+
+    这是一个 best-effort 的解析器，用于从工具返回的文本中
+    提取可供规则匹配使用的结构化字段。
+    """
+    parsed = {}
+
+    if not result_str:
+        return parsed
+
+    # 尝试 JSON 解析
+    try:
+        data = json.loads(result_str)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # 文本解析：提取常见模式
+    text = str(result_str).lower()
+
+    # 提取 GINI 系数
+    import re
+
+    gini_match = re.search(r"gini[^:：]*[:：]\s*([\d.]+)", text)
+    if gini_match:
+        try:
+            parsed["gini"] = float(gini_match.group(1))
+        except ValueError:
+            pass
+
+    # 提取变化率
+    roc_match = re.search(r"(?:变化率|rate.?of.?change|变化幅度)[^:：]*[:：]\s*([-\d.]+)", text)
+    if roc_match:
+        try:
+            parsed["rate_of_change"] = float(roc_match.group(1))
+        except ValueError:
+            pass
+
+    # 提取 top1 贡献
+    top1_match = re.search(r"(?:top.?1|最大|第一)[^:：]*(?:贡献|contribution)[^:：]*[:：]\s*([-\d.]+)", text)
+    if top1_match:
+        try:
+            parsed["top1_contribution"] = float(top1_match.group(1))
+        except ValueError:
+            pass
+
+    # 检查是否有发版
+    if any(kw in text for kw in ["发版", "release", "deploy", "上线", "灰度"]):
+        parsed["has_release"] = True
+    else:
+        parsed["has_release"] = False
+
+    return parsed
+
+
+def _format_evidence_summary(evidence_pool: dict) -> str:
+    """格式化 Evidence Pool 为报告摘要"""
+    if not evidence_pool:
+        return "暂无分析数据。"
+
+    lines = []
+    for step_id, evidence in evidence_pool.items():
+        tool = evidence.get("tool", "unknown")
+        result = evidence.get("result", "")
+        # 截断过长结果
+        if len(str(result)) > 500:
+            result = str(result)[:500] + "..."
+        lines.append(f"### {step_id}\n- 工具: {tool}\n- 结果: {result}\n")
+
+    return "\n".join(lines)
+
+
+def _format_scenario_summary(matched_scenarios: list[dict]) -> str:
+    """格式化场景匹配结果为报告摘要"""
+    if not matched_scenarios:
+        return "未匹配到已知故障场景。"
+
+    lines = []
+    full_matches = [s for s in matched_scenarios if s.get("match_score", 0) == 1.0]
+    partial_matches = [s for s in matched_scenarios if 0 < s.get("match_score", 0) < 1.0]
+
+    if full_matches:
+        lines.append("### 完全匹配的场景")
+        for s in full_matches:
+            lines.append(
+                f"- **{s['scenario_name']} / {s['rule_name']}** "
+                f"(置信度: {s['confidence']})"
+            )
+            lines.append(f"  结论: {s['conclusion']}")
+            lines.append(f"  建议: {s['suggested_action']}")
+
+    if partial_matches:
+        lines.append("### 部分匹配的场景（供参考）")
+        for s in partial_matches:
+            lines.append(
+                f"- **{s['scenario_name']} / {s['rule_name']}** "
+                f"(匹配度: {s['match_score']:.0%})"
+            )
+
+    return "\n".join(lines)

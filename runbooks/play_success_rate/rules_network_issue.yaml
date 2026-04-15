@@ -1,0 +1,58 @@
+# 场景规则：网络问题
+scenario: network_issue
+display_name: "网络问题"
+description: "用户侧或骨干网络问题导致的播放成功率下降"
+
+required_evidence:
+  - overall_trend
+  - check_network_quality
+  - drill_isp
+  - drill_region
+  - gini_region
+  - check_cdn_error
+  - check_changes
+
+rules:
+  - id: backbone_network_issue
+    name: "骨干网络问题"
+    conditions:
+      - step: check_network_quality
+        field: rate_of_change
+        op: ">"
+        value: 0.15
+        description: "网络质量指标明显下降"
+      - step: gini_region
+        field: gini
+        op: ">"
+        value: 0.6
+        description: "地区维度较集中"
+      - step: check_cdn_error
+        field: rate_of_change
+        op: "<"
+        value: 0.1
+        description: "CDN侧无异常（排除CDN问题）"
+    confidence: medium
+    conclusion: "骨干网络问题导致特定地区播放质量下降"
+    suggested_action: "确认是否有骨干网络故障公告，联系网络运营商排查"
+
+  - id: widespread_network_degradation
+    name: "大范围网络质量下降"
+    conditions:
+      - step: check_network_quality
+        field: rate_of_change
+        op: ">"
+        value: 0.1
+        description: "网络质量指标下降"
+      - step: gini_region
+        field: gini
+        op: "<"
+        value: 0.4
+        description: "地区维度分散（广泛影响）"
+      - step: gini_isp
+        field: gini
+        op: "<"
+        value: 0.4
+        description: "运营商维度也分散"
+    confidence: low
+    conclusion: "大范围网络质量下降，可能与外部因素（如大型活动导致网络拥塞）相关"
+    suggested_action: "观察是否为临时性波动，检查是否有大型活动或突发事件"

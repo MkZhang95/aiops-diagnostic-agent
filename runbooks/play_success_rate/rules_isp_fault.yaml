@@ -1,0 +1,58 @@
+# 场景规则：运营商故障
+scenario: isp_fault
+display_name: "运营商故障"
+description: "运营商网络问题导致的播放成功率下降"
+
+required_evidence:
+  - overall_trend
+  - drill_isp
+  - drill_region
+  - gini_isp
+  - check_cdn_error
+  - check_network_quality
+  - check_changes
+
+rules:
+  - id: single_isp_fault
+    name: "单一运营商故障"
+    conditions:
+      - step: gini_isp
+        field: gini
+        op: ">"
+        value: 0.7
+        description: "运营商维度高度集中"
+      - step: drill_isp
+        field: top1_contribution
+        op: ">"
+        value: 0.6
+        description: "单一运营商贡献超过60%"
+      - step: check_cdn_error
+        field: rate_of_change
+        op: "<"
+        value: 0.1
+        description: "CDN错误率无明显变化（排除CDN问题）"
+    confidence: high
+    conclusion: "单一运营商网络故障，非CDN侧问题"
+    suggested_action: "联系该运营商确认网络状况，通知受影响用户"
+
+  - id: multi_isp_regional_fault
+    name: "多运营商区域性故障"
+    conditions:
+      - step: gini_region
+        field: gini
+        op: ">"
+        value: 0.7
+        description: "地区维度高度集中"
+      - step: gini_isp
+        field: gini
+        op: "<"
+        value: 0.5
+        description: "运营商维度不集中（多运营商受影响）"
+      - step: check_cdn_error
+        field: rate_of_change
+        op: "<"
+        value: 0.1
+        description: "CDN错误率无明显变化"
+    confidence: medium
+    conclusion: "特定地区多运营商均受影响，可能是区域骨干网问题"
+    suggested_action: "排查该地区骨干网状况，确认是否有光缆中断等基础设施问题"

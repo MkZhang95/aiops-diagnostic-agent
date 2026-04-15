@@ -1,0 +1,72 @@
+# 场景规则：客户端 Bug
+scenario: client_bug
+display_name: "客户端Bug"
+description: "播放器或客户端问题导致的播放成功率下降"
+
+required_evidence:
+  - overall_trend
+  - check_player_error
+  - drill_app_version
+  - check_changes
+
+rules:
+  - id: version_specific_bug
+    name: "特定版本Bug"
+    conditions:
+      - step: check_player_error
+        field: rate_of_change
+        op: ">"
+        value: 0.1
+        description: "播放器错误率较基线上升超过10%"
+      - step: drill_app_version
+        field: top1_contribution
+        op: ">"
+        value: 0.6
+        description: "单一版本贡献超过60%的异常"
+    confidence: high
+    conclusion: "特定版本客户端Bug导致播放失败率上升"
+    suggested_action: "回滚该版本或推送热修复，检查该版本的变更日志"
+
+  - id: new_release_regression
+    name: "新版本回归问题"
+    conditions:
+      - step: check_player_error
+        field: rate_of_change
+        op: ">"
+        value: 0.1
+        description: "播放器错误率上升"
+      - step: drill_app_version
+        field: top1_contribution
+        op: ">"
+        value: 0.4
+        description: "某版本贡献较大异常"
+      - step: check_changes
+        field: has_release
+        op: "=="
+        value: true
+        description: "时间窗口内有客户端发版"
+    confidence: high
+    conclusion: "新版本发布后出现回归问题"
+    suggested_action: "暂停灰度放量，回滚至上一稳定版本，排查新版本变更"
+
+  - id: os_specific_issue
+    name: "特定平台问题"
+    conditions:
+      - step: check_player_error
+        field: rate_of_change
+        op: ">"
+        value: 0.1
+        description: "播放器错误率上升"
+      - step: drill_app_version
+        field: top1_contribution
+        op: "<"
+        value: 0.4
+        description: "不集中在单一版本"
+      - step: drill_os
+        field: top1_contribution
+        op: ">"
+        value: 0.7
+        description: "集中在单一操作系统"
+    confidence: medium
+    conclusion: "特定操作系统平台兼容性问题"
+    suggested_action: "排查该平台的系统更新或API变更，检查播放器在该平台的适配"
