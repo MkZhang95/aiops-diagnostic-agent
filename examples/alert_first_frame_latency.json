@@ -1,0 +1,10 @@
+{
+  "metric_name": "first_frame_latency_p95",
+  "description": "首帧耗时 P95 劣化",
+  "severity": "warning",
+  "current_value": 1200,
+  "baseline_value": 800,
+  "timestamp": 1705485000,
+  "service": "video-player",
+  "region": "all"
+}

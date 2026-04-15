@@ -1,0 +1,10 @@
+{
+  "metric_name": "buffering_rate",
+  "description": "卡顿率上升",
+  "severity": "warning",
+  "current_value": 5.1,
+  "baseline_value": 3.2,
+  "timestamp": 1705398600,
+  "service": "video-transcode",
+  "region": "all"
+}

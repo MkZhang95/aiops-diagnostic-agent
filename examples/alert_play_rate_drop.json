@@ -1,0 +1,10 @@
+{
+  "metric_name": "play_success_rate",
+  "description": "播放成功率下降",
+  "severity": "critical",
+  "current_value": 97.8,
+  "baseline_value": 99.2,
+  "timestamp": 1705312200,
+  "service": "video-cdn",
+  "region": "all"
+}
