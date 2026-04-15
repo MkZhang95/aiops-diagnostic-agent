@@ -2,8 +2,8 @@
 
 两阶段架构:
   Phase 1 (采集): init_plan → analyze_alert → agent_node ⇄ tool_node
-                  → update_checklist → verify_completeness
-  Phase 2 (匹配): match_scenarios → generate_report → END
+                  → update_checklist → verify_completeness → (自由探索)
+  Phase 2 (归因): match_scenarios → diagnose → END
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from langgraph.prebuilt import ToolNode
 from src.agent.nodes import (
     make_analyze_alert,
     make_agent_node,
-    make_generate_report,
+    make_diagnose,
     make_init_plan,
     make_match_scenarios,
     update_checklist,
@@ -44,9 +44,9 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     graph.add_node("update_checklist", update_checklist)
     graph.add_node("verify_completeness", verify_completeness)
 
-    # ---- Phase 2: 场景匹配 + 报告 ----
+    # ---- Phase 2: 归因判断 ----
     graph.add_node("match_scenarios", make_match_scenarios(runbook_dir))
-    graph.add_node("generate_report", make_generate_report(llm))
+    graph.add_node("diagnose", make_diagnose(llm))
 
     # ---- 连线 ----
     graph.set_entry_point("init_plan")
@@ -69,7 +69,7 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     # update_checklist → 回到 agent_node 继续
     graph.add_edge("update_checklist", "agent_node")
 
-    # verify_completeness 之后：有遗漏 → agent_node，完成 → match_scenarios
+    # verify_completeness 之后：三种去向
     graph.add_conditional_edges(
         "verify_completeness",
         _route_after_verify,
@@ -80,8 +80,8 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     )
 
     # Phase 2 线性流程
-    graph.add_edge("match_scenarios", "generate_report")
-    graph.add_edge("generate_report", END)
+    graph.add_edge("match_scenarios", "diagnose")
+    graph.add_edge("diagnose", END)
 
     return graph.compile()
 
@@ -111,10 +111,11 @@ def _route_after_agent(state: dict) -> str:
 def _route_after_verify(state: dict) -> str:
     """verify_completeness 之后的路由
 
-    - iteration == -1: 全部完成，进入场景匹配
-    - iteration >= 0: 有遗漏，回到 agent_node
+    - phase == "diagnosing": 采集结束，进入场景匹配 + 归因
+    - phase == "exploring": must 完成，回到 agent_node 自由探索
+    - 其他: 有遗漏，回到 agent_node 继续
     """
-    iteration = state.get("iteration", 0)
-    if iteration == -1:
+    phase = state.get("phase", "collecting")
+    if phase == "diagnosing":
         return "match_scenarios"
     return "agent_node"

@@ -96,6 +96,7 @@ class AgentState(TypedDict):
     Phase 2 架构：
     - messages: LangGraph 消息列表（自动合并）
     - alert: 当前告警事件
+    - phase: 当前阶段 (collecting / exploring / diagnosing)
     - checklist: 分析步骤清单（Checklist-Driven）
     - evidence_pool: 共享结果池（step_id → 结果）
     - matched_scenarios: 场景匹配结果
@@ -106,6 +107,7 @@ class AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     alert: AlertEvent
+    phase: str  # collecting / exploring / diagnosing
     checklist: list[dict]  # ChecklistItemState 序列化后的 dict list
     evidence_pool: dict[str, Any]
     matched_scenarios: list[dict]  # MatchedScenario 序列化后的 dict list

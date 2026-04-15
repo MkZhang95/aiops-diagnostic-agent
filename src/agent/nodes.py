@@ -1,19 +1,21 @@
 """Agent 节点定义 — Phase 2 版本
 
 两阶段架构:
-  Phase 1 (采集): init_plan → agent_node → tool_node → update_checklist → verify_completeness
-  Phase 2 (匹配): match_scenarios → generate_report
+  Phase 1 (采集): init_plan → analyze_alert → agent_node ⇄ tool_node
+                  → update_checklist → verify_completeness → (自由探索)
+  Phase 2 (归因): match_scenarios → diagnose → END
 """
 
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime
 from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from src.agent.prompts import REPORT_PROMPT, SYSTEM_PROMPT
+from src.agent.prompts import DIAGNOSE_PROMPT, FREE_EXPLORE_PROMPT, SYSTEM_PROMPT
 from src.knowledge.rule_matcher import RuleMatcher
 from src.knowledge.runbook_loader import ChecklistItem, RunbookLoader
 
@@ -44,6 +46,7 @@ def make_init_plan(runbook_dir: str = "runbooks"):
                 "checklist": [],
                 "evidence_pool": {},
                 "matched_scenarios": [],
+                "phase": "collecting",
                 "iteration": 0,
             }
 
@@ -76,6 +79,7 @@ def make_init_plan(runbook_dir: str = "runbooks"):
             "checklist": checklist,
             "evidence_pool": {},
             "matched_scenarios": [],
+            "phase": "collecting",
             "iteration": 0,
         }
 
@@ -202,12 +206,13 @@ def update_checklist(state: dict) -> dict:
     checklist = state.get("checklist", [])
     evidence_pool = state.get("evidence_pool", {})
 
-    if not checklist:
-        return {}
-
     # 提取最近一轮的 tool 调用和结果
     tool_calls_info = _extract_recent_tool_info(state["messages"])
 
+    if not tool_calls_info:
+        return {}
+
+    # 匹配 checklist 中的步骤
     for item in checklist:
         if item["status"] == "done":
             continue
@@ -226,6 +231,26 @@ def update_checklist(state: dict) -> dict:
                 }
                 break
 
+    # 自由探索阶段的工具调用也写入 evidence_pool（不在 checklist 中的调用）
+    matched_ids = {item["id"] for item in checklist if item["status"] == "done"}
+    for tc_name, tc_args, tc_result in tool_calls_info:
+        # 检查该调用是否已被 checklist 匹配
+        already_matched = any(
+            _matches_step(tc_name, tc_args, item)
+            for item in checklist
+            if item["status"] == "done"
+        )
+        if not already_matched:
+            # 自由探索的调用，用工具名+参数生成唯一 key
+            extra_id = f"extra_{tc_name}_{len(evidence_pool)}"
+            evidence_pool[extra_id] = {
+                "tool": tc_name,
+                "args": tc_args,
+                "result": tc_result,
+                "parsed": _parse_tool_result(tc_result),
+                "timestamp": datetime.now().isoformat(),
+            }
+
     return {
         "checklist": checklist,
         "evidence_pool": evidence_pool,
@@ -235,12 +260,19 @@ def update_checklist(state: dict) -> dict:
 def verify_completeness(state: dict) -> dict:
     """验证必要步骤是否全部完成
 
-    程序化节点，返回的 iteration 值用于路由判断：
-    - iteration = -1: 全部 must 步骤完成，可进入 Phase 2
-    - iteration >= 0: 有遗漏，回到 agent_node 继续
+    程序化节点，通过 phase 字段控制路由：
+    - phase = "collecting": 有遗漏 must 步骤，回到 agent_node 继续
+    - phase = "exploring": must 步骤全完成，进入自由探索模式
+    - phase = "diagnosing": 采集结束，进入 Phase 2 归因
     """
     checklist = state.get("checklist", [])
     iteration = state.get("iteration", 0)
+    phase = state.get("phase", "collecting")
+
+    # 如果已经处于自由探索阶段，说明 agent 已经完成了自由探索
+    # （上一轮 agent_node 没有 tool_calls，走到 verify → 说明 agent 主动结束）
+    if phase == "exploring":
+        return {"phase": "diagnosing"}
 
     if not checklist:
         # 没有 checklist（自由推理模式），检查是否有足够工具调用
@@ -250,7 +282,7 @@ def verify_completeness(state: dict) -> dict:
             if hasattr(msg, "tool_calls") and msg.tool_calls
         )
         if tool_count >= 3:
-            return {"iteration": -1}
+            return {"phase": "diagnosing"}
         return {"iteration": iteration}
 
     pending_must = [
@@ -258,12 +290,15 @@ def verify_completeness(state: dict) -> dict:
     ]
 
     if not pending_must:
-        # 所有 must 步骤完成
-        return {"iteration": -1}
+        # 所有 must 步骤完成，进入自由探索模式
+        return {
+            "messages": [SystemMessage(content=FREE_EXPLORE_PROMPT)],
+            "phase": "exploring",
+        }
 
-    # 防止无限循环：最多重试 3 次
+    # 防止无限循环
     if iteration >= 10:
-        return {"iteration": -1}
+        return {"phase": "exploring"}
 
     # 有遗漏，构造提醒消息
     loader = RunbookLoader()
@@ -330,20 +365,25 @@ def make_match_scenarios(runbook_dir: str = "runbooks"):
     return match_scenarios
 
 
-def make_generate_report(llm):
-    """创建 generate_report 节点 — LLM 生成归因报告"""
+def make_diagnose(llm):
+    """创建 diagnose 节点 — LLM 综合 evidence + 规则参考进行归因判断
+
+    规则匹配结果作为参考依据注入，LLM 做最终归因推理：
+    - 有匹配规则 → LLM 验证是否合理，可采纳/修正/否决
+    - 无匹配规则 → LLM 自由推理，可能发现新故障模式
+    """
     model = llm.get_chat_model()
 
-    def generate_report(state: dict) -> dict:
+    def diagnose(state: dict) -> dict:
         alert = state["alert"]
         evidence_pool = state.get("evidence_pool", {})
         matched_scenarios = state.get("matched_scenarios", [])
 
-        # 构建报告生成 Prompt
+        # 构建归因判断 Prompt
         evidence_summary = _format_evidence_summary(evidence_pool)
         scenario_summary = _format_scenario_summary(matched_scenarios)
 
-        report_prompt = REPORT_PROMPT.format(
+        diagnose_prompt = DIAGNOSE_PROMPT.format(
             alert_id=alert.alert_id,
             metric_name=alert.metric_name,
             description=alert.description,
@@ -354,15 +394,13 @@ def make_generate_report(llm):
         )
 
         response = model.invoke(
-            [
-                SystemMessage(content="你是一个 AIOps 归因分析报告撰写专家。"),
-                HumanMessage(content=report_prompt),
-            ]
+            state["messages"]
+            + [HumanMessage(content=diagnose_prompt)]
         )
 
         return {"messages": [response]}
 
-    return generate_report
+    return diagnose
 
 
 # ============================================================
@@ -441,9 +479,6 @@ def _parse_tool_result(result_str: str) -> dict:
 
     # 文本解析：提取常见模式
     text = str(result_str).lower()
-
-    # 提取 GINI 系数
-    import re
 
     gini_match = re.search(r"gini[^:：]*[:：]\s*([\d.]+)", text)
     if gini_match:

@@ -23,8 +23,8 @@ Phase 1: 数据采集（Checklist 驱动）
                         verify_completeness
                           (must全完成?)
                                 ↓
-Phase 2: 场景匹配 + 报告
-  match_scenarios → generate_report → END
+Phase 2: 归因判断（规则参考 + LLM 主导）
+  match_scenarios → diagnose → END
 ```
 
 ### 文件结构
