@@ -1,6 +1,5 @@
 """Unit tests for core algorithms: structural contribution and GINI concentration."""
 
-import pytest
 
 from src.tools.concentration import compute_gini
 from src.tools.contribution import compute_lmdi, compute_structural

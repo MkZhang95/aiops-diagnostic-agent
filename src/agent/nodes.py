@@ -11,14 +11,12 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime
-from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage
 
 from src.agent.prompts import DIAGNOSE_PROMPT, FREE_EXPLORE_PROMPT, SYSTEM_PROMPT
 from src.knowledge.rule_matcher import RuleMatcher
 from src.knowledge.runbook_loader import ChecklistItem, RunbookLoader
-
 
 # ============================================================
 # Phase 1: 数据采集节点
@@ -232,7 +230,6 @@ def update_checklist(state: dict) -> dict:
                 break
 
     # 自由探索阶段的工具调用也写入 evidence_pool（不在 checklist 中的调用）
-    matched_ids = {item["id"] for item in checklist if item["status"] == "done"}
     for tc_name, tc_args, tc_result in tool_calls_info:
         # 检查该调用是否已被 checklist 匹配
         already_matched = any(
@@ -420,7 +417,6 @@ def _extract_recent_tool_info(
 
     # 从后往前找最近的 AI message (with tool_calls) 和对应的 tool results
     tool_results_map: dict[str, str] = {}
-    tool_calls_list: list[tuple[str, dict, str]] = []
 
     for msg in reversed(messages):
         # ToolMessage: 工具返回结果
@@ -496,7 +492,11 @@ def _parse_tool_result(result_str: str) -> dict:
             pass
 
     # 提取 top1 贡献
-    top1_match = re.search(r"(?:top.?1|最大|第一)[^:：]*(?:贡献|contribution)[^:：]*[:：]\s*([-\d.]+)", text)
+    top1_pattern = (
+        r"(?:top.?1|最大|第一)[^:：]*"
+        r"(?:贡献|contribution)[^:：]*[:：]\s*([-\d.]+)"
+    )
+    top1_match = re.search(top1_pattern, text)
     if top1_match:
         try:
             parsed["top1_contribution"] = float(top1_match.group(1))

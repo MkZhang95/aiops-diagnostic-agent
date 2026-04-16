@@ -2,12 +2,12 @@
 
 import os
 import tempfile
+
 import pytest
 import yaml
 
-from src.knowledge.runbook_loader import RunbookLoader, ChecklistItem
-from src.knowledge.rule_matcher import RuleMatcher, MatchedRule
-
+from src.knowledge.rule_matcher import MatchedRule, RuleMatcher
+from src.knowledge.runbook_loader import RunbookLoader
 
 # ============================================================
 # RunbookLoader 测试

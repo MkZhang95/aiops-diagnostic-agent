@@ -81,13 +81,13 @@ def check_concentration(contribution_data: str, threshold: float = 0.7) -> str:
     top = sorted_data[:3]
 
     lines = [
-        f"集中性分析结果:",
+        "集中性分析结果:",
         f"  GINI 系数: {gini:.3f}",
         f"  集中程度: {level}",
         f"  阈值: {threshold}",
         f"  是否集中: {'是' if gini > threshold else '否'}",
         f"  解读: {interpretation}",
-        f"\n  Top 贡献者:",
+        "\n  Top 贡献者:",
     ]
 
     for t in top:

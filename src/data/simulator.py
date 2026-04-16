@@ -39,7 +39,6 @@ class DataSimulator:
         metrics = self._scenario.get("metrics", {})
 
         if metric_name not in metrics:
-            available = list(metrics.keys())
             return TimeSeriesData(
                 metric_name=metric_name,
                 t1_value=0, t2_value=0, delta=0, delta_ratio=0,

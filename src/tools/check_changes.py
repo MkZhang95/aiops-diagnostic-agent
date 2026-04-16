@@ -27,7 +27,7 @@ def check_changes(start_time: int = 0, end_time: int = 3600, service_name: str =
     changes = _simulator.get_changes(start_time, end_time, svc)
 
     if not changes:
-        return f"在指定时间窗口内未发现变更事件。"
+        return "在指定时间窗口内未发现变更事件。"
 
     lines = ["变更事件检查结果:"]
     for ch in changes:

@@ -12,8 +12,8 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from src.agent.nodes import (
-    make_analyze_alert,
     make_agent_node,
+    make_analyze_alert,
     make_diagnose,
     make_init_plan,
     make_match_scenarios,

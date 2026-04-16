@@ -209,6 +209,6 @@ def compute_contribution(dimension_data: str, method: str = "structural") -> str
 
     total_c = sum(c["contribution"] for c in results)
     lines.append(f"\n  总贡献度: {total_c:+.4f}")
-    lines.append(f"  验证: 各维度贡献度之和应等于指标总变化量")
+    lines.append("  验证: 各维度贡献度之和应等于指标总变化量")
 
     return "\n".join(lines)

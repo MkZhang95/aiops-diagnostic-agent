@@ -14,7 +14,6 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from pydantic import BaseModel, Field
 
-
 # ============================================================
 # Pydantic 模型（用于结构化数据）
 # ============================================================

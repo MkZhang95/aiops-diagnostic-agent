@@ -267,7 +267,7 @@ class RuleMatcher:
                 lines.append(f"- 置信度: {r.confidence}")
                 lines.append(f"- 结论: {r.conclusion}")
                 lines.append(f"- 建议操作: {r.suggested_action}")
-                lines.append(f"- 匹配条件:")
+                lines.append("- 匹配条件:")
                 for c in r.matched_conditions:
                     lines.append(f"  - ✅ {c}")
                 lines.append("")
