@@ -1,0 +1,47 @@
+# Golden cases for deterministic, non-LLM regression tests.
+#
+# These cases evaluate the harness around the Agent:
+# - Runbook steps can be executed by tools.
+# - Evidence Pool contains required structured evidence.
+# - RuleMatcher returns expected known/partial scenarios.
+# - Key parsed evidence fields match the known root-cause story.
+
+cases:
+  - id: phone_sharing_coverage_drop
+    scenario: phone_sharing_coverage_drop
+    metric: p2p_bandwidth_share
+    description: "P2P 大盘占比下降，由手机有效覆盖度漏斗中的连接成功率下降触发"
+    expected:
+      required_evidence:
+        - overall_trend
+        - phone_share_trend
+        - phone_sharing_trend
+        - phone_coverage_trend
+        - phone_coverage_formula
+        - gini_app
+        - gini_os
+      full_match:
+        scenario: phone_sharing
+        rule_id: phone_sharing_drop
+      parsed:
+        phone_coverage_formula.top_contributor: connect_success_rate
+        phone_coverage_formula.found: true
+        overall_trend.direction: down
+
+  - id: play_success_rate_drop
+    scenario: play_success_rate_drop
+    metric: play_success_rate
+    description: "播放成功率下降，问题集中在华南地区；当前模拟数据缺少 CDN 错误率，所以只要求部分匹配和关键证据"
+    expected:
+      required_evidence:
+        - overall_trend
+        - drill_region
+        - gini_region
+        - check_changes
+      partial_match:
+        scenario: cdn_fault
+        min_score: 0.3
+      parsed:
+        drill_region.top1_name: cn-south
+        drill_region.top1_contribution: 0.823
+        overall_trend.direction: down
