@@ -1,0 +1,37 @@
+# 场景规则：盒子分享比下降-有效覆盖度
+# 主证据：P2P 大盘占比 + 盒子大盘占比 + 盒子分享比 三者均异常下降
+# 辅助证据：app / os 维度集中性分析（规则不强制，交由报告呈现）
+
+scenario: box_sharing
+display_name: "盒子分享比下降-有效覆盖度"
+description: "盒子链路有效覆盖度下降导致 P2P 大盘占比下跌"
+
+required_evidence:
+  - overall_trend
+  - box_share_trend
+  - box_sharing_trend
+  - gini_app
+  - gini_os
+
+rules:
+  - id: box_sharing_drop
+    name: "盒子分享比下降-有效覆盖度"
+    conditions:
+      - step: overall_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "P2P 大盘占比较基线下降超过 3%"
+      - step: box_share_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "盒子大盘占比下降超过 3%"
+      - step: box_sharing_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "盒子分享比下降超过 3%"
+    confidence: high
+    conclusion: "盒子侧有效覆盖度下降：盒子大盘占比和盒子分享比同步下跌，带动 P2P 整体占比下降。建议结合 app/os 维度集中性进一步定位具体受影响终端范围。"
+    suggested_action: "排查盒子端最新发版/推送策略，检查调度配置是否影响盒子拉流可见性，并结合 app/os 集中性定位具体终端。"

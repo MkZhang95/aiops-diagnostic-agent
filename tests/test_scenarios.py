@@ -138,6 +138,32 @@ class TestScenarioFirstFrameLatency:
         assert len(last_ai_msgs) > 0
 
 
+@pytest.mark.integration
+class TestScenarioPhoneSharingCoverage:
+    """场景 4: P2P 大盘占比下降 — 手机分享比下降-有效覆盖度"""
+
+    def test_full_run(self):
+        result = _run_scenario("phone_sharing_coverage_drop")
+
+        assert result.get("phase") == "diagnosing"
+
+        evidence_pool = result.get("evidence_pool", {})
+        assert len(evidence_pool) >= 3
+
+        tool_call_count = sum(
+            1
+            for msg in result["messages"]
+            if hasattr(msg, "tool_calls") and msg.tool_calls
+        )
+        assert tool_call_count >= 3
+
+        last_ai_msgs = [
+            msg for msg in result["messages"]
+            if hasattr(msg, "content") and msg.content and len(msg.content) > 100
+        ]
+        assert len(last_ai_msgs) > 0
+
+
 class TestScenarioData:
     """验证场景数据完整性（不需要 LLM）"""
 
@@ -163,3 +189,89 @@ class TestScenarioData:
 
         for name, data in SCENARIOS.items():
             assert "expected_root_cause" in data, f"{name} 缺少 expected_root_cause"
+
+
+class TestP2PRuleMatching:
+    """P2P 场景的规则匹配端到端验证（不需要 LLM）.
+
+    手动按 analysis_plan 逐步调用工具填充 evidence_pool，
+    再跑 RuleMatcher，确认 `phone_sharing` 场景完全匹配、
+    另两个场景（盒子/RTM）不匹配。
+    """
+
+    def _run_plan_and_match(self, scenario_name: str, metric: str):
+        import json
+
+        import yaml
+
+        from src.knowledge.rule_matcher import RuleMatcher
+
+        simulator = DataSimulator(scenario_name)
+        tools = get_all_tools(simulator)
+        tool_map = {t.name: t for t in tools}
+
+        with open(f"runbooks/{metric}/analysis_plan.yaml") as f:
+            plan = yaml.safe_load(f)
+
+        marker = "===EVIDENCE==="
+
+        def parse(text: str) -> dict:
+            if marker not in text:
+                return {}
+            try:
+                return json.loads(text.split(marker, 1)[1].strip())
+            except Exception:
+                return {}
+
+        evidence_pool = {}
+        for step in plan["steps"]:
+            tool = tool_map.get(step["action"])
+            assert tool is not None, f"missing tool {step['action']}"
+            result = tool.invoke(step["params"])
+            evidence_pool[step["id"]] = {
+                "tool": step["action"],
+                "result": result,
+                "parsed": parse(result),
+            }
+
+        matcher = RuleMatcher("runbooks")
+        matched = matcher.match_all_scenarios(metric, evidence_pool)
+        return evidence_pool, matched
+
+    def test_phone_sharing_scenario_fully_matches(self):
+        _pool, matched = self._run_plan_and_match(
+            "phone_sharing_coverage_drop", "p2p_bandwidth_share"
+        )
+        full = [m for m in matched if m.match_score >= 1.0]
+        summary = [(m.scenario, m.match_score) for m in matched]
+        assert any(m.scenario == "phone_sharing" for m in full), (
+            f"phone_sharing 未完全匹配，实际 matched={summary}"
+        )
+
+    def test_other_p2p_scenarios_do_not_fully_match(self):
+        _pool, matched = self._run_plan_and_match(
+            "phone_sharing_coverage_drop", "p2p_bandwidth_share"
+        )
+        full = {m.scenario for m in matched if m.match_score >= 1.0}
+        assert "box_sharing" not in full
+        assert "rtm_expansion" not in full
+
+    def test_report_renders_without_llm(self):
+        """render_report 在没有 diagnose 消息时也能产出完整报告骨架。"""
+        from src.report import render_report
+
+        pool, matched = self._run_plan_and_match(
+            "phone_sharing_coverage_drop", "p2p_bandwidth_share"
+        )
+        simulator = DataSimulator("phone_sharing_coverage_drop")
+        state = {
+            "alert": _make_alert_event(simulator.alert),
+            "checklist": [],
+            "evidence_pool": pool,
+            "matched_scenarios": matched,
+            "messages": [],
+        }
+        md = render_report(state)
+        assert "归因诊断报告" in md
+        assert "手机分享比下降-有效覆盖度" in md
+        assert "证据池摘要" in md

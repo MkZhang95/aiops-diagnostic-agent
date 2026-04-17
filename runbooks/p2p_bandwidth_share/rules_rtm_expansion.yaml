@@ -1,0 +1,31 @@
+# 场景规则：RTM 扩量影响
+# 主证据：P2P 大盘占比下降 + RTM 占比同步上升
+# 辅助证据：CDN 厂商 / 发布点维度集中性
+
+scenario: rtm_expansion
+display_name: "RTM 扩量影响"
+description: "RTM 推流扩量挤占 P2P 分享空间，导致 P2P 大盘占比下降"
+
+required_evidence:
+  - overall_trend
+  - rtm_share_trend
+  - gini_cdn_vendor
+  - gini_release_point
+
+rules:
+  - id: rtm_expansion_squeeze
+    name: "RTM 扩量挤占"
+    conditions:
+      - step: overall_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "P2P 大盘占比较基线下降超过 3%"
+      - step: rtm_share_trend
+        field: rate_of_change
+        op: ">"
+        value: 0.05
+        description: "RTM 占比较基线上升超过 5%"
+    confidence: high
+    conclusion: "RTM 扩量挤占：RTM 占比明显上升、P2P 大盘占比同步下降，是典型的 RTM 扩量挤占场景。结合 CDN 厂商 / 发布点集中性判断扩量是否绑定特定厂商或业务线。"
+    suggested_action: "与 RTM 扩量负责人确认本次扩量目标与灰度范围，评估是否需要回调 RTM 配额或调整 P2P 分享策略。"

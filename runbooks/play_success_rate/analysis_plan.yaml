@@ -5,12 +5,17 @@
 metric: play_success_rate
 display_name: "播放成功率"
 
+# 父指标公式（供 decompose_formula 使用）
+formula:
+  description: "play_success_rate ≈ cdn_success_rate × decode_success_rate × network_success_rate"
+  sub_metrics: [cdn_success_rate, decode_success_rate, network_success_rate]
+
 steps:
   # ======== 整体趋势 ========
   - id: overall_trend
     name: "查看播放成功率整体趋势"
     priority: must
-    action: query_metrics
+    action: query_metric
     params:
       metric: play_success_rate
     depends_on: []
@@ -21,7 +26,7 @@ steps:
   - id: check_cdn_error
     name: "查询CDN错误率"
     priority: must
-    action: query_metrics
+    action: query_metric
     params:
       metric: cdn_error_rate
     depends_on: []
@@ -31,7 +36,7 @@ steps:
   - id: check_player_error
     name: "查询播放器错误率"
     priority: must
-    action: query_metrics
+    action: query_metric
     params:
       metric: player_error_rate
     depends_on: []
@@ -41,7 +46,7 @@ steps:
   - id: check_network_quality
     name: "查询网络质量指标"
     priority: should
-    action: query_metrics
+    action: query_metric
     params:
       metric: network_quality
     depends_on: []
@@ -51,7 +56,7 @@ steps:
   - id: check_changes
     name: "查询变更事件"
     priority: must
-    action: check_changes
+    action: query_events
     params: {}
     depends_on: []
     used_by: [cdn_fault, isp_fault, client_bug, network_issue]
@@ -61,7 +66,7 @@ steps:
   - id: drill_isp
     name: "按运营商维度下钻"
     priority: must
-    action: drill_down
+    action: query_metric
     params:
       metric: play_success_rate
       dimension: isp
@@ -72,7 +77,7 @@ steps:
   - id: drill_region
     name: "按地区维度下钻"
     priority: must
-    action: drill_down
+    action: query_metric
     params:
       metric: play_success_rate
       dimension: region
@@ -83,7 +88,7 @@ steps:
   - id: drill_app_version
     name: "按客户端版本下钻"
     priority: must
-    action: drill_down
+    action: query_metric
     params:
       metric: play_success_rate
       dimension: app_version
@@ -94,7 +99,7 @@ steps:
   - id: drill_os
     name: "按操作系统下钻"
     priority: should
-    action: drill_down
+    action: query_metric
     params:
       metric: play_success_rate
       dimension: os
@@ -102,59 +107,72 @@ steps:
     used_by: [client_bug]
     description: "按操作系统维度拆解，辅助判断是否与特定平台相关"
 
-  # ======== 集中度分析（依赖下钻结果） ========
+  # ======== 维度分解（GINI + 结构贡献度一次算完） ========
   - id: gini_isp
-    name: "运营商维度集中度分析"
+    name: "运营商维度分解(结构贡献+GINI)"
     priority: must
-    action: analyze_concentration
+    action: decompose_metric
     params:
       metric: play_success_rate
       dimension: isp
     depends_on: [drill_isp]
     used_by: [cdn_fault, isp_fault]
-    description: "计算运营商维度GINI系数，判断问题集中度"
+    description: "按运营商分解播放成功率变化：结构贡献度 + GINI 集中度"
 
   - id: gini_region
-    name: "地区维度集中度分析"
+    name: "地区维度分解(结构贡献+GINI)"
     priority: must
-    action: analyze_concentration
+    action: decompose_metric
     params:
       metric: play_success_rate
       dimension: region
     depends_on: [drill_region]
     used_by: [cdn_fault, network_issue]
-    description: "计算地区维度GINI系数，判断问题是否集中在少数地区"
+    description: "按地区分解播放成功率变化：结构贡献度 + GINI 集中度"
 
-  # ======== 贡献度分解（依赖下钻结果） ========
-  - id: contribution_isp
-    name: "运营商贡献度分解"
+  # ======== 公式级拆解（LMDI，乘法指标） ========
+  - id: formula_decompose
+    name: "公式级 LMDI 拆解"
     priority: should
-    action: analyze_contribution
+    action: decompose_formula
     params:
       metric: play_success_rate
-      dimension: isp
-    depends_on: [drill_isp]
-    used_by: [cdn_fault, isp_fault]
-    description: "量化各运营商对播放成功率变化的贡献度"
+      sub_metrics: "cdn_success_rate,decode_success_rate,network_success_rate"
+    depends_on: [overall_trend]
+    used_by: [cdn_fault, client_bug, network_issue]
+    description: "用 LMDI 定位播放成功率变化主要由哪个子链路（CDN/解码/网络）贡献"
 
-  - id: contribution_region
-    name: "地区贡献度分解"
+  # ======== 相关性分析 ========
+  - id: correlate_metrics
+    name: "关联指标相关性"
     priority: should
-    action: analyze_contribution
+    action: analyze_correlation
     params:
-      metric: play_success_rate
-      dimension: region
-    depends_on: [drill_region]
-    used_by: [cdn_fault, network_issue]
-    description: "量化各地区对播放成功率变化的贡献度"
+      base_metric: play_success_rate
+      related_metrics: "cdn_error_rate,player_error_rate,network_quality"
+    depends_on: [overall_trend]
+    used_by: [cdn_fault, client_bug, network_issue]
+    description: "计算基础指标与关联指标的皮尔逊相关性，找出同步异动最强的关联指标"
+
+  # ======== 事件命中匹配 ========
+  - id: match_change_events
+    name: "匹配发布/变更事件"
+    priority: should
+    action: match_events
+    params:
+      keywords: "发版,release,deploy,上线,灰度"
+    depends_on: []
+    used_by: [cdn_fault, isp_fault, client_bug, network_issue]
+    description: "在异常窗口命中发版/变更事件，辅助判定是否由发版引发"
 
   # ======== 日志查询 ========
   - id: search_error_logs
     name: "查询错误日志"
     priority: should
-    action: search_logs
+    action: query_logs
     params:
       keyword: "error"
+      level: "ERROR"
     depends_on: []
     used_by: [cdn_fault, client_bug]
     description: "搜索相关错误日志，寻找具体报错信息辅助定位"

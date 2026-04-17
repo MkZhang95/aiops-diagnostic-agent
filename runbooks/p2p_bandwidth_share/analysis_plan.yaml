@@ -1,0 +1,212 @@
+# P2P 大盘带宽占比 — 统一采集计划
+# 所有场景需要的分析步骤在此统一定义（已去重）
+# 各场景规则文件通过引用 step id 从 Evidence Pool 取结果
+
+metric: p2p_bandwidth_share
+display_name: "P2P 大盘带宽占比"
+
+# 手机有效覆盖度的公式（decompose_formula 使用）
+formula:
+  metric: phone_effective_coverage
+  description: "phone_effective_coverage = 返回节点成功率 × 连接成功率 × 尝试订阅率 × 订阅成功率"
+  sub_metrics:
+    - return_node_success_rate
+    - connect_success_rate
+    - subscribe_attempt_rate
+    - subscribe_success_rate
+
+steps:
+  # ======== 整体 & 子指标趋势 ========
+  - id: overall_trend
+    name: "P2P 大盘带宽占比整体趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: p2p_bandwidth_share
+    depends_on: []
+    used_by: [box_sharing, rtm_expansion, phone_sharing]
+    description: "确认 P2P 大盘占比是否真的下降"
+
+  - id: box_share_trend
+    name: "盒子大盘占比趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: box_bandwidth_share
+    depends_on: []
+    used_by: [box_sharing]
+    description: "盒子链路大盘占比变化"
+
+  - id: box_sharing_trend
+    name: "盒子分享比趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: box_sharing_ratio
+    depends_on: []
+    used_by: [box_sharing]
+    description: "盒子分享比变化（反映盒子作为 P2P 节点的有效贡献率）"
+
+  - id: phone_share_trend
+    name: "手机大盘占比趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: phone_bandwidth_share
+    depends_on: []
+    used_by: [phone_sharing]
+    description: "手机链路大盘占比变化"
+
+  - id: phone_sharing_trend
+    name: "手机分享比趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: phone_sharing_ratio
+    depends_on: []
+    used_by: [phone_sharing]
+    description: "手机分享比变化"
+
+  - id: phone_coverage_trend
+    name: "手机有效覆盖度趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: phone_effective_coverage
+    depends_on: []
+    used_by: [phone_sharing]
+    description: "手机端有效覆盖度（能正常订阅到 P2P 节点的终端占比）"
+
+  - id: rtm_share_trend
+    name: "RTM 占比趋势"
+    priority: must
+    action: query_metric
+    params:
+      metric: rtm_bandwidth_share
+    depends_on: []
+    used_by: [rtm_expansion]
+    description: "RTM 推流占比变化（扩量会挤占 P2P 分享空间）"
+
+  # ======== 维度下钻（依赖 overall_trend） ========
+  - id: drill_app
+    name: "按 app 维度下钻"
+    priority: should
+    action: query_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: app
+    depends_on: [overall_trend]
+    used_by: [box_sharing, phone_sharing]
+    description: "查看问题是否集中在某个 app"
+
+  - id: drill_os
+    name: "按 os 维度下钻"
+    priority: should
+    action: query_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: os
+    depends_on: [overall_trend]
+    used_by: [box_sharing, phone_sharing]
+    description: "查看问题在 iOS/Android 的分布"
+
+  - id: drill_cdn_vendor
+    name: "按 CDN 厂商下钻"
+    priority: should
+    action: query_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: cdn_vendor
+    depends_on: [overall_trend]
+    used_by: [rtm_expansion]
+    description: "查看是否集中在某 CDN 厂商"
+
+  - id: drill_release_point
+    name: "按发布点下钻"
+    priority: should
+    action: query_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: release_point
+    depends_on: [overall_trend]
+    used_by: [rtm_expansion]
+    description: "查看是否集中在某发布点（RTM 扩量常绑定特定发布点）"
+
+  # ======== 维度集中性分析（辅助判断） ========
+  - id: gini_app
+    name: "app 维度集中性分析"
+    priority: should
+    action: decompose_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: app
+    depends_on: [drill_app]
+    used_by: [box_sharing, phone_sharing]
+    description: "app 维度 GINI + 结构贡献，辅助判断问题是否集中在少数 app"
+
+  - id: gini_os
+    name: "os 维度集中性分析"
+    priority: should
+    action: decompose_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: os
+    depends_on: [drill_os]
+    used_by: [box_sharing, phone_sharing]
+    description: "os 维度 GINI + 结构贡献，辅助判断 iOS/Android 分布"
+
+  - id: gini_cdn_vendor
+    name: "CDN 厂商维度集中性分析"
+    priority: should
+    action: decompose_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: cdn_vendor
+    depends_on: [drill_cdn_vendor]
+    used_by: [rtm_expansion]
+    description: "CDN 厂商维度 GINI + 结构贡献，辅助判断是否扩量集中在某厂商"
+
+  - id: gini_release_point
+    name: "发布点维度集中性分析"
+    priority: should
+    action: decompose_metric
+    params:
+      metric: p2p_bandwidth_share
+      dimension: release_point
+    depends_on: [drill_release_point]
+    used_by: [rtm_expansion]
+    description: "发布点维度 GINI + 结构贡献，辅助判断是否扩量绑定特定发布点"
+
+  # ======== 手机有效覆盖度公式拆解（LMDI） ========
+  - id: phone_coverage_formula
+    name: "手机有效覆盖度公式拆解 (LMDI)"
+    priority: must
+    action: decompose_formula
+    params:
+      metric: phone_effective_coverage
+      sub_metrics: "return_node_success_rate,connect_success_rate,subscribe_attempt_rate,subscribe_success_rate"
+    depends_on: [phone_coverage_trend]
+    used_by: [phone_sharing]
+    description: "把手机有效覆盖度按漏斗公式拆成 4 个子指标，定位是哪一步出了问题"
+
+  # ======== 变更与日志 ========
+  - id: match_change_events
+    name: "匹配发布/扩量事件"
+    priority: should
+    action: match_events
+    params:
+      keywords: "发版,release,扩量,RTM,灰度"
+    depends_on: []
+    used_by: [box_sharing, rtm_expansion, phone_sharing]
+    description: "命中最近的发版/扩量/配置变更"
+
+  - id: search_error_logs
+    name: "查询错误日志"
+    priority: should
+    action: query_logs
+    params:
+      keyword: ""
+      level: "ERROR"
+    depends_on: []
+    used_by: [box_sharing, rtm_expansion, phone_sharing]
+    description: "查看 P2P 链路相关异常日志"

@@ -1,8 +1,8 @@
 """Unit tests for core algorithms: structural contribution and GINI concentration."""
 
 
-from src.tools.concentration import compute_gini
-from src.tools.contribution import compute_lmdi, compute_structural
+from src.tools.decompose_formula import compute_lmdi
+from src.tools.decompose_metric import compute_gini, compute_structural
 
 
 class TestStructuralContribution:

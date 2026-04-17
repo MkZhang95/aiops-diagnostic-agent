@@ -1,9 +1,7 @@
 """AIOps Diagnostic Agent CLI entry point."""
 
 import argparse
-import os
 import time
-from datetime import datetime
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -13,6 +11,7 @@ from src.agent import build_graph
 from src.agent.state import AlertEvent
 from src.data import DataSimulator, list_scenarios
 from src.llm import get_llm
+from src.report import save_report
 from src.tools import get_all_tools
 
 console = Console()
@@ -139,14 +138,13 @@ def main():
 
     if report:
         console.print("\n")
-        console.print(Panel(Markdown(report), title="归因诊断报告", border_style="green"))
+        console.print(
+            Panel(Markdown(report), title="LLM 归因段", border_style="green")
+        )
 
-        os.makedirs("output", exist_ok=True)
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        report_path = f"output/report_{scenario_name}_{timestamp}.md"
-        with open(report_path, "w") as f:
-            f.write(report)
-        console.print(f"\n  报告已保存: [cyan]{report_path}[/cyan]")
+    # 用 report 模块渲染结构化完整报告（告警+checklist+evidence+matched+diagnose）
+    report_path = save_report(final_state, output_dir="output", scenario_name=scenario_name)
+    console.print(f"\n  结构化报告已保存: [cyan]{report_path}[/cyan]")
 
     # 统计
     evidence_count = len(final_state.get("evidence_pool", {}))

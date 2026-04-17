@@ -32,13 +32,18 @@ SYSTEM_PROMPT = """你是一个专业的 AIOps 智能归因分析 Agent。你的
 
 ## 可用工具
 
-- `query_metrics`: 查询指标时序数据
-- `drill_down`: 按维度下钻分析
-- `analyze_contribution`: 贡献度分解（结构分解或 LMDI）
-- `analyze_concentration`: 集中度分析（GINI 系数）
-- `compare_points`: 两点对比分析
-- `search_logs`: 搜索日志
-- `check_changes`: 查询变更事件
+工具分两类：Query 负责取数，Compute 基于取数结果做计算。
+
+**Query 类**
+- `query_metric`: 指标查询（整体 / 维度下钻 / 过滤三合一，通过 dimension、filters 参数路由）
+- `query_logs`: 日志查询（支持 keyword / level / source 过滤）
+- `query_events`: 变更事件查询（支持 event_type / service 过滤）
+
+**Compute 类**
+- `decompose_metric`: 维度分解 — 结构贡献度 + GINI 集中度（比率型指标）
+- `decompose_formula`: 公式拆解 — LMDI 算法（乘法型指标，需在分析计划里给出 sub_metrics）
+- `analyze_correlation`: 皮尔逊相关性分析（基础指标 vs 相关指标）
+- `match_events`: 按关键词/类型命中变更事件，返回 matched 布尔位
 """
 
 FREE_EXPLORE_PROMPT = """--- 清单必要步骤已全部完成 ---

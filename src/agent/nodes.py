@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import datetime
 
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -390,10 +389,9 @@ def make_diagnose(llm):
             scenario_summary=scenario_summary,
         )
 
-        response = model.invoke(
-            state["messages"]
-            + [HumanMessage(content=diagnose_prompt)]
-        )
+        # P0-3: 不传完整消息历史，只传精简的归因 Prompt。
+        # evidence_summary / scenario_summary 已包含所有必要上下文。
+        response = model.invoke([HumanMessage(content=diagnose_prompt)])
 
         return {"messages": [response]}
 
@@ -454,62 +452,30 @@ def _matches_step(tool_name: str, tool_args: dict, step: dict) -> bool:
     return True
 
 
+EVIDENCE_MARKER = "===EVIDENCE==="
+
+
 def _parse_tool_result(result_str: str) -> dict:
-    """尝试从工具返回结果中解析结构化数据
+    """从工具返回中解析结构化证据。
 
-    这是一个 best-effort 的解析器，用于从工具返回的文本中
-    提取可供规则匹配使用的结构化字段。
+    约定：所有工具在返回文本末尾追加一个证据块：
+        ...人类可读文本...
+        ===EVIDENCE===
+        {"key": value, ...}
+
+    解析方式：按 marker split，取后半段 JSON.loads。
+    命中不了就返回 {}，不做兜底的文本正则猜测——
+    规则匹配宁可不命中也不能命中错误字段。
     """
-    parsed = {}
+    if not isinstance(result_str, str) or EVIDENCE_MARKER not in result_str:
+        return {}
 
-    if not result_str:
-        return parsed
-
-    # 尝试 JSON 解析
     try:
-        data = json.loads(result_str)
-        if isinstance(data, dict):
-            return data
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    # 文本解析：提取常见模式
-    text = str(result_str).lower()
-
-    gini_match = re.search(r"gini[^:：]*[:：]\s*([\d.]+)", text)
-    if gini_match:
-        try:
-            parsed["gini"] = float(gini_match.group(1))
-        except ValueError:
-            pass
-
-    # 提取变化率
-    roc_match = re.search(r"(?:变化率|rate.?of.?change|变化幅度)[^:：]*[:：]\s*([-\d.]+)", text)
-    if roc_match:
-        try:
-            parsed["rate_of_change"] = float(roc_match.group(1))
-        except ValueError:
-            pass
-
-    # 提取 top1 贡献
-    top1_pattern = (
-        r"(?:top.?1|最大|第一)[^:：]*"
-        r"(?:贡献|contribution)[^:：]*[:：]\s*([-\d.]+)"
-    )
-    top1_match = re.search(top1_pattern, text)
-    if top1_match:
-        try:
-            parsed["top1_contribution"] = float(top1_match.group(1))
-        except ValueError:
-            pass
-
-    # 检查是否有发版
-    if any(kw in text for kw in ["发版", "release", "deploy", "上线", "灰度"]):
-        parsed["has_release"] = True
-    else:
-        parsed["has_release"] = False
-
-    return parsed
+        json_str = result_str.split(EVIDENCE_MARKER, 1)[1].strip()
+        data = json.loads(json_str)
+        return data if isinstance(data, dict) else {}
+    except (json.JSONDecodeError, IndexError):
+        return {}
 
 
 def _format_evidence_summary(evidence_pool: dict) -> str:
@@ -520,10 +486,12 @@ def _format_evidence_summary(evidence_pool: dict) -> str:
     lines = []
     for step_id, evidence in evidence_pool.items():
         tool = evidence.get("tool", "unknown")
-        result = evidence.get("result", "")
-        # 截断过长结果
-        if len(str(result)) > 500:
-            result = str(result)[:500] + "..."
+        result = str(evidence.get("result", ""))
+        # 剥离给规则引擎用的 JSON 证据块，只保留人类可读部分
+        if EVIDENCE_MARKER in result:
+            result = result.split(EVIDENCE_MARKER, 1)[0].rstrip()
+        if len(result) > 500:
+            result = result[:500] + "..."
         lines.append(f"### {step_id}\n- 工具: {tool}\n- 结果: {result}\n")
 
     return "\n".join(lines)

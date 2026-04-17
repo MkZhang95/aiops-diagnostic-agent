@@ -1,36 +1,45 @@
-"""Tool registry and simulator injection."""
+"""Tool registry and simulator injection.
+
+工具按功能分两类：
+  Query 类（数据查询）: query_metric / query_logs / query_events
+  Compute 类（基于查询结果的计算）: decompose_metric / decompose_formula /
+                                    analyze_correlation / match_events
+"""
 
 from langchain_core.tools import BaseTool
 
 from src.data.simulator import DataSimulator
 
-from . import check_changes, compare_points, drill_down, query_metrics, search_logs
-from .concentration import check_concentration
-from .contribution import compute_contribution
+from . import (
+    analyze_correlation,
+    decompose_formula,
+    decompose_metric,
+    match_events,
+    query_events,
+    query_logs,
+    query_metric,
+)
 
 
 def get_all_tools(simulator: DataSimulator) -> list[BaseTool]:
-    """Get all tools with simulator injected.
-
-    Args:
-        simulator: DataSimulator instance providing mock data.
-
-    Returns:
-        List of LangChain tools ready for agent use.
-    """
-    # Inject simulator into tools that need it
-    query_metrics.set_simulator(simulator)
-    drill_down.set_simulator(simulator)
-    search_logs.set_simulator(simulator)
-    check_changes.set_simulator(simulator)
-    compare_points.set_simulator(simulator)
+    """Get all tools with simulator injected."""
+    for mod in (
+        query_metric,
+        query_logs,
+        query_events,
+        decompose_metric,
+        decompose_formula,
+        analyze_correlation,
+        match_events,
+    ):
+        mod.set_simulator(simulator)
 
     return [
-        query_metrics.query_metrics,
-        drill_down.drill_down,
-        compute_contribution,
-        check_concentration,
-        search_logs.search_logs,
-        check_changes.check_changes,
-        compare_points.compare_time_points,
+        query_metric.query_metric,
+        query_logs.query_logs,
+        query_events.query_events,
+        decompose_metric.decompose_metric,
+        decompose_formula.decompose_formula,
+        analyze_correlation.analyze_correlation,
+        match_events.match_events,
     ]

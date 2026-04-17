@@ -220,6 +220,182 @@ SCENARIOS = {
         ],
         "expected_root_cause": "中国电信 DNS 节点维护导致 DNS 解析延迟激增，叠加电信骨干网链路质量下降，造成首帧耗时劣化",
     },
+
+    # ============================================================
+    # 场景 4: P2P 大盘带宽占比下降 — 手机分享比下降-有效覆盖度
+    #   期望规则匹配: phone_sharing / phone_sharing_drop
+    #   手机有效覆盖度 = 返回节点成功率 × 连接成功率 × 尝试订阅率 × 订阅成功率
+    #   本 case 的瓶颈在 connect_success_rate（0.97 → 0.78）
+    # ============================================================
+    "phone_sharing_coverage_drop": {
+        "alert": {
+            "metric_name": "p2p_bandwidth_share",
+            "description": "P2P 大盘带宽占比下降",
+            "severity": "warning",
+            "current_value": 40.0,
+            "baseline_value": 45.0,
+            "timestamp": 1705571400,
+            "service": "p2p-cdn",
+            "region": "all",
+        },
+        "metrics": {
+            # ---- 主指标 ----
+            "p2p_bandwidth_share": {
+                "t1_value": 45.0,
+                "t2_value": 40.0,
+                "delta": -5.0,
+                "delta_ratio": -11.1,
+                "time_series": [
+                    (0, 45.0), (300, 44.8), (600, 44.5), (900, 44.0),
+                    (1200, 43.2), (1500, 42.4), (1800, 41.5), (2100, 40.8),
+                    (2400, 40.3), (2700, 40.1), (3000, 40.0), (3600, 40.0),
+                ],
+            },
+            # ---- 手机链路（均下降） ----
+            "phone_bandwidth_share": {
+                "t1_value": 28.0,
+                "t2_value": 23.0,
+                "delta": -5.0,
+                "delta_ratio": -17.9,
+                "time_series": [
+                    (0, 28.0), (300, 27.8), (600, 27.3), (900, 26.6),
+                    (1200, 25.7), (1500, 24.8), (1800, 24.0), (2100, 23.4),
+                    (2400, 23.1), (2700, 23.0), (3000, 23.0), (3600, 23.0),
+                ],
+            },
+            "phone_sharing_ratio": {
+                "t1_value": 0.62,
+                "t2_value": 0.52,
+                "delta": -0.10,
+                "delta_ratio": -16.1,
+                "time_series": [
+                    (0, 0.62), (300, 0.61), (600, 0.60), (900, 0.59),
+                    (1200, 0.57), (1500, 0.55), (1800, 0.54), (2100, 0.53),
+                    (2400, 0.52), (2700, 0.52), (3000, 0.52), (3600, 0.52),
+                ],
+            },
+            "phone_effective_coverage": {
+                "t1_value": 0.85,
+                "t2_value": 0.72,
+                "delta": -0.13,
+                "delta_ratio": -15.3,
+                "time_series": [
+                    (0, 0.85), (300, 0.84), (600, 0.83), (900, 0.81),
+                    (1200, 0.78), (1500, 0.76), (1800, 0.74), (2100, 0.73),
+                    (2400, 0.72), (2700, 0.72), (3000, 0.72), (3600, 0.72),
+                ],
+            },
+            # ---- 有效覆盖度漏斗（LMDI 公式子指标，连接成功率是瓶颈） ----
+            "return_node_success_rate": {
+                "t1_value": 0.98,
+                "t2_value": 0.97,
+                "delta": -0.01,
+                "delta_ratio": -1.0,
+                "time_series": [
+                    (0, 0.98), (600, 0.98), (1200, 0.975), (1800, 0.97),
+                    (2400, 0.97), (3000, 0.97), (3600, 0.97),
+                ],
+            },
+            "connect_success_rate": {
+                "t1_value": 0.97,
+                "t2_value": 0.78,
+                "delta": -0.19,
+                "delta_ratio": -19.6,
+                "time_series": [
+                    (0, 0.97), (300, 0.96), (600, 0.94), (900, 0.90),
+                    (1200, 0.86), (1500, 0.83), (1800, 0.80), (2100, 0.79),
+                    (2400, 0.78), (2700, 0.78), (3000, 0.78), (3600, 0.78),
+                ],
+            },
+            "subscribe_attempt_rate": {
+                "t1_value": 0.95,
+                "t2_value": 0.94,
+                "delta": -0.01,
+                "delta_ratio": -1.1,
+                "time_series": [
+                    (0, 0.95), (600, 0.95), (1200, 0.945), (1800, 0.94),
+                    (2400, 0.94), (3000, 0.94), (3600, 0.94),
+                ],
+            },
+            "subscribe_success_rate": {
+                "t1_value": 0.96,
+                "t2_value": 0.95,
+                "delta": -0.01,
+                "delta_ratio": -1.0,
+                "time_series": [
+                    (0, 0.96), (600, 0.96), (1200, 0.955), (1800, 0.95),
+                    (2400, 0.95), (3000, 0.95), (3600, 0.95),
+                ],
+            },
+            # ---- 盒子链路（基本无变化，场景 1 不会命中） ----
+            "box_bandwidth_share": {
+                "t1_value": 17.0,
+                "t2_value": 17.0,
+                "delta": 0.0,
+                "delta_ratio": 0.0,
+                "time_series": [
+                    (0, 17.0), (600, 17.0), (1200, 17.1), (1800, 17.0),
+                    (2400, 17.0), (3000, 17.0), (3600, 17.0),
+                ],
+            },
+            "box_sharing_ratio": {
+                "t1_value": 0.55,
+                "t2_value": 0.55,
+                "delta": 0.0,
+                "delta_ratio": 0.0,
+                "time_series": [
+                    (0, 0.55), (600, 0.55), (1200, 0.55), (1800, 0.55),
+                    (2400, 0.55), (3000, 0.55), (3600, 0.55),
+                ],
+            },
+            # ---- RTM（基本无变化，场景 2 不会命中） ----
+            "rtm_bandwidth_share": {
+                "t1_value": 8.0,
+                "t2_value": 8.1,
+                "delta": 0.1,
+                "delta_ratio": 1.25,
+                "time_series": [
+                    (0, 8.0), (600, 8.0), (1200, 8.05), (1800, 8.1),
+                    (2400, 8.1), (3000, 8.1), (3600, 8.1),
+                ],
+            },
+        },
+        "drill_down": {
+            # p2p_bandwidth_share 的下钻数据（simulator.drill_down 不区分 metric，
+            # 此处数据对应主指标 p2p_bandwidth_share 的 -5 变化）
+            "app": [
+                {"dimension_value": "app_1", "t1_value": 18.0, "t2_value": 14.0, "delta": -4.0, "contribution_ratio": 80.0},
+                {"dimension_value": "app_2", "t1_value": 15.0, "t2_value": 14.2, "delta": -0.8, "contribution_ratio": 16.0},
+                {"dimension_value": "app_3", "t1_value": 12.0, "t2_value": 11.8, "delta": -0.2, "contribution_ratio": 4.0},
+            ],
+            "os": [
+                {"dimension_value": "android", "t1_value": 28.0, "t2_value": 23.0, "delta": -5.0, "contribution_ratio": 96.0},
+                {"dimension_value": "ios", "t1_value": 17.0, "t2_value": 17.0, "delta": 0.0, "contribution_ratio": 4.0},
+            ],
+            "cdn_vendor": [
+                {"dimension_value": "vendor_a", "t1_value": 20.0, "t2_value": 17.8, "delta": -2.2, "contribution_ratio": 44.0},
+                {"dimension_value": "vendor_b", "t1_value": 15.0, "t2_value": 13.5, "delta": -1.5, "contribution_ratio": 30.0},
+                {"dimension_value": "vendor_c", "t1_value": 10.0, "t2_value": 8.7, "delta": -1.3, "contribution_ratio": 26.0},
+            ],
+            "release_point": [
+                {"dimension_value": "release_hot", "t1_value": 22.0, "t2_value": 19.5, "delta": -2.5, "contribution_ratio": 50.0},
+                {"dimension_value": "release_cold", "t1_value": 15.0, "t2_value": 13.5, "delta": -1.5, "contribution_ratio": 30.0},
+                {"dimension_value": "release_live", "t1_value": 8.0, "t2_value": 7.0, "delta": -1.0, "contribution_ratio": 20.0},
+            ],
+        },
+        "logs": [
+            {"timestamp": 1705570800, "level": "WARN", "message": "Phone peer connect latency spike on Android: avg 220ms -> 520ms", "source": "p2p-client-metrics", "region": "all"},
+            {"timestamp": 1705570900, "level": "ERROR", "message": "Phone P2P connect_success_rate dropped to 78% (baseline 97%) on app_1 android", "source": "p2p-dashboard", "region": "all"},
+            {"timestamp": 1705571000, "level": "ERROR", "message": "NAT traversal failed for android peers: STUN binding timeout", "source": "p2p-signal", "region": "all"},
+            {"timestamp": 1705571100, "level": "WARN", "message": "app_1 v8.12.0 connect timeout rate 18% vs baseline 2%", "source": "client-crash-report", "region": "all"},
+            {"timestamp": 1705571300, "level": "ERROR", "message": "Phone effective coverage degraded: funnel bottleneck = connect_success_rate", "source": "p2p-dashboard", "region": "all"},
+        ],
+        "changes": [
+            {"timestamp": 1705564800, "change_type": "deployment", "description": "app_1 v8.12.0 全量发版 (调整了 P2P 连接建立逻辑和超时策略)", "author": "mobile-team", "affected_services": ["app_1", "p2p-client"]},
+            {"timestamp": 1705561200, "change_type": "config", "description": "P2P 调度灰度：Android 端新 NAT 穿透策略上线", "author": "p2p-sched", "affected_services": ["p2p-signal", "p2p-client"]},
+        ],
+        "expected_root_cause": "手机侧（主要 Android/app_1）连接成功率骤降导致手机有效覆盖度下跌，手机分享比和手机大盘占比随之下降，带动 P2P 大盘占比下降——典型的手机分享比下降-有效覆盖度场景",
+    },
 }
 
 

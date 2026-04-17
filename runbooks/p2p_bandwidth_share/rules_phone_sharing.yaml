@@ -1,0 +1,50 @@
+# 场景规则：手机分享比下降-有效覆盖度
+# 主证据：P2P 大盘占比 + 手机大盘占比 + 手机分享比 + 手机有效覆盖度 四者均下降
+#         并通过公式拆解 (LMDI) 定位有效覆盖度漏斗里的短板
+# 辅助证据：app / os 维度集中性
+
+scenario: phone_sharing
+display_name: "手机分享比下降-有效覆盖度"
+description: "手机端有效覆盖度下降导致 P2P 大盘占比下跌"
+
+required_evidence:
+  - overall_trend
+  - phone_share_trend
+  - phone_sharing_trend
+  - phone_coverage_trend
+  - phone_coverage_formula
+  - gini_app
+  - gini_os
+
+rules:
+  - id: phone_sharing_drop
+    name: "手机分享比下降-有效覆盖度"
+    conditions:
+      - step: overall_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "P2P 大盘占比较基线下降超过 3%"
+      - step: phone_share_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "手机大盘占比下降超过 3%"
+      - step: phone_sharing_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "手机分享比下降超过 3%"
+      - step: phone_coverage_trend
+        field: rate_of_change
+        op: "<"
+        value: -0.03
+        description: "手机有效覆盖度下降超过 3%"
+      - step: phone_coverage_formula
+        field: found
+        op: "=="
+        value: true
+        description: "已完成 LMDI 公式拆解（返回节点成功率 × 连接成功率 × 尝试订阅率 × 订阅成功率）"
+    confidence: high
+    conclusion: "手机侧有效覆盖度下降：手机大盘占比、手机分享比、手机有效覆盖度同步下跌，LMDI 拆解可定位有效覆盖度漏斗（返回节点成功率/连接成功率/尝试订阅率/订阅成功率）中的薄弱环节。建议结合 app/os 维度集中性进一步圈定受影响版本与平台。"
+    suggested_action: "查看 phone_coverage_formula 的 top_contributor，定位漏斗断点后联动客户端/调度侧排查；同时结合 app/os 集中性确认影响面是否集中在近期发版的版本或某一平台。"

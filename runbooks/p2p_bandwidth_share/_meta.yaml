@@ -1,0 +1,11 @@
+metric: p2p_bandwidth_share
+display_name: "P2P 大盘带宽占比"
+description: "P2P 大盘带宽占比异常相关的归因场景集合（盒子/手机分享链路、RTM 扩量）"
+related_metrics:
+  - box_bandwidth_share
+  - box_sharing_ratio
+  - phone_bandwidth_share
+  - phone_sharing_ratio
+  - phone_effective_coverage
+  - rtm_bandwidth_share
+owner: "P2P CDN 团队"
