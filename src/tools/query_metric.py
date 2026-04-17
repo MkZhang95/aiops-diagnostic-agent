@@ -14,50 +14,45 @@ from langchain_core.tools import tool
 
 from src.data.simulator import DataSimulator
 
-_simulator: DataSimulator | None = None
-
-
-def set_simulator(sim: DataSimulator):
-    global _simulator
-    _simulator = sim
-
 
 def _evidence_block(payload: dict) -> str:
     return "\n\n===EVIDENCE===\n" + json.dumps(payload, ensure_ascii=False)
 
 
-@tool
-def query_metric(metric: str, dimension: str = "", filters: str = "") -> str:
-    """查询指标数据，三种模式自动路由：
+def make_query_metric_tool(simulator: DataSimulator):
+    """Create a query_metric tool bound to one diagnostic data source."""
 
-    1. 整体查询: query_metric(metric="play_success_rate")
-       返回 t1/t2/delta/rate_of_change/trend
-    2. 维度下钻: query_metric(metric="play_success_rate", dimension="isp")
-       返回各维度值的 t1/t2/delta 以及 top1_contribution
-    3. 条件过滤: query_metric(metric="play_success_rate", filters="region=cn-south")
-       过滤到指定维度值下的数据
+    @tool("query_metric")
+    def query_metric(metric: str, dimension: str = "", filters: str = "") -> str:
+        """查询指标数据，三种模式自动路由：
 
-    输入:
-        metric: 指标名（如 play_success_rate, cdn_error_rate）
-        dimension: 可选，下钻维度（如 isp / region / app_version）
-        filters: 可选，过滤条件，格式 "key=value"，多个用逗号分隔
-    """
-    if _simulator is None:
-        return "错误：数据模拟器未初始化。" + _evidence_block({})
+        1. 整体查询: query_metric(metric="play_success_rate")
+           返回 t1/t2/delta/rate_of_change/trend
+        2. 维度下钻: query_metric(metric="play_success_rate", dimension="isp")
+           返回各维度值的 t1/t2/delta 以及 top1_contribution
+        3. 条件过滤: query_metric(metric="play_success_rate", filters="region=cn-south")
+           过滤到指定维度值下的数据
 
-    if dimension:
-        return _drill(metric, dimension)
-    if filters:
-        return _filter(metric, filters)
-    return _overall(metric)
+        输入:
+            metric: 指标名（如 play_success_rate, cdn_error_rate）
+            dimension: 可选，下钻维度（如 isp / region / app_version）
+            filters: 可选，过滤条件，格式 "key=value"，多个用逗号分隔
+        """
+        if dimension:
+            return _drill(simulator, metric, dimension)
+        if filters:
+            return _filter(simulator, metric, filters)
+        return _overall(simulator, metric)
+
+    return query_metric
 
 
-def _overall(metric: str) -> str:
-    data = _simulator.query_metrics(metric, 0, 3600)
+def _overall(simulator: DataSimulator, metric: str) -> str:
+    data = simulator.query_metrics(metric, 0, 3600)
     if not data.data_points:
         payload = {"metric": metric, "found": False}
         return (
-            f"未找到指标 {metric} 的数据。可用指标: {_simulator.get_available_metrics()}"
+            f"未找到指标 {metric} 的数据。可用指标: {simulator.get_available_metrics()}"
             + _evidence_block(payload)
         )
 
@@ -99,14 +94,14 @@ def _overall(metric: str) -> str:
     return text + _evidence_block(payload)
 
 
-def _drill(metric: str, dimension: str) -> str:
-    results = _simulator.drill_down(metric, dimension, (0, 3600))
+def _drill(simulator: DataSimulator, metric: str, dimension: str) -> str:
+    results = simulator.drill_down(metric, dimension, (0, 3600))
     if not results:
         payload = {
             "metric": metric,
             "dimension": dimension,
             "found": False,
-            "available_dimensions": _simulator.get_available_dimensions(),
+            "available_dimensions": simulator.get_available_dimensions(),
         }
         return (
             f"指标 {metric} 在维度 {dimension} 无下钻数据。"
@@ -144,7 +139,7 @@ def _drill(metric: str, dimension: str) -> str:
     return "\n".join(lines) + _evidence_block(payload)
 
 
-def _filter(metric: str, filters: str) -> str:
+def _filter(simulator: DataSimulator, metric: str, filters: str) -> str:
     filter_dict = {}
     for token in filters.split(","):
         token = token.strip()
@@ -157,7 +152,7 @@ def _filter(metric: str, filters: str) -> str:
 
     matches = []
     for dim_key, expected in filter_dict.items():
-        for d in _simulator.drill_down(metric, dim_key, (0, 3600)):
+        for d in simulator.drill_down(metric, dim_key, (0, 3600)):
             if d.dimension_value.lower() == expected.lower():
                 matches.append({
                     "dimension": dim_key,

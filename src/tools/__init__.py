@@ -22,24 +22,17 @@ from . import (
 
 
 def get_all_tools(simulator: DataSimulator) -> list[BaseTool]:
-    """Get all tools with simulator injected."""
-    for mod in (
-        query_metric,
-        query_logs,
-        query_events,
-        decompose_metric,
-        decompose_formula,
-        analyze_correlation,
-        match_events,
-    ):
-        mod.set_simulator(simulator)
+    """Create tools bound to one diagnostic data source.
 
+    Each call returns fresh tool instances that close over the provided simulator,
+    avoiding module-level global state across concurrent diagnostic runs.
+    """
     return [
-        query_metric.query_metric,
-        query_logs.query_logs,
-        query_events.query_events,
-        decompose_metric.decompose_metric,
-        decompose_formula.decompose_formula,
-        analyze_correlation.analyze_correlation,
-        match_events.match_events,
+        query_metric.make_query_metric_tool(simulator),
+        query_logs.make_query_logs_tool(simulator),
+        query_events.make_query_events_tool(simulator),
+        decompose_metric.make_decompose_metric_tool(simulator),
+        decompose_formula.make_decompose_formula_tool(simulator),
+        analyze_correlation.make_analyze_correlation_tool(simulator),
+        match_events.make_match_events_tool(simulator),
     ]

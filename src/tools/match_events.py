@@ -10,81 +10,76 @@ from langchain_core.tools import tool
 
 from src.data.simulator import DataSimulator
 
-_simulator: DataSimulator | None = None
-
-
-def set_simulator(sim: DataSimulator):
-    global _simulator
-    _simulator = sim
-
 
 def _evidence_block(payload: dict) -> str:
     return "\n\n===EVIDENCE===\n" + json.dumps(payload, ensure_ascii=False)
 
 
-@tool
-def match_events(
-    keywords: str = "",
-    event_type: str = "",
-    service: str = "",
-) -> str:
-    """在异常窗口内匹配特定类型/关键词的变更事件。
+def make_match_events_tool(simulator: DataSimulator):
+    """Create a match_events tool bound to one diagnostic data source."""
 
-    与 query_events 的区别：query_events 偏列表/统计，match_events 偏命中判定，
-    返回 `matched`（是否有命中）供规则直接使用。
+    @tool("match_events")
+    def match_events(
+        keywords: str = "",
+        event_type: str = "",
+        service: str = "",
+    ) -> str:
+        """在异常窗口内匹配特定类型/关键词的变更事件。
 
-    输入:
-        keywords: 可选，在 description 中匹配的关键词，逗号分隔（任一命中即视为匹配）
-        event_type: 可选，事件类型过滤（deployment/config/scaling）
-        service: 可选，服务名过滤
+        与 query_events 的区别：query_events 偏列表/统计，match_events 偏命中判定，
+        返回 `matched`（是否有命中）供规则直接使用。
 
-    输出: 命中事件列表 + 是否命中 + 命中数。
-    """
-    if _simulator is None:
-        return "错误：数据模拟器未初始化。" + _evidence_block({})
+        输入:
+            keywords: 可选，在 description 中匹配的关键词，逗号分隔（任一命中即视为匹配）
+            event_type: 可选，事件类型过滤（deployment/config/scaling）
+            service: 可选，服务名过滤
 
-    changes = _simulator.get_changes(0, 3600, service or None)
-    if event_type:
-        changes = [ch for ch in changes if ch.change_type == event_type]
+        输出: 命中事件列表 + 是否命中 + 命中数。
+        """
+        changes = simulator.get_changes(0, 3600, service or None)
+        if event_type:
+            changes = [ch for ch in changes if ch.change_type == event_type]
 
-    kw_list = [k.strip().lower() for k in keywords.split(",") if k.strip()]
-    if kw_list:
-        changes = [
-            ch for ch in changes
-            if any(kw in ch.description.lower() for kw in kw_list)
-        ]
+        kw_list = [k.strip().lower() for k in keywords.split(",") if k.strip()]
+        if kw_list:
+            changes = [
+                ch for ch in changes
+                if any(kw in ch.description.lower() for kw in kw_list)
+            ]
 
-    if not changes:
+        if not changes:
+            payload = {
+                "keywords": kw_list,
+                "event_type": event_type,
+                "service": service,
+                "matched": False,
+                "match_count": 0,
+            }
+            return "未命中任何变更事件。" + _evidence_block(payload)
+
+        lines = ["命中的变更事件:"]
+        matched = []
+        for ch in changes:
+            lines.append(
+                f"  [{ch.change_type.upper()}] {ch.description}\n"
+                f"         执行者: {ch.author} | 影响服务: {', '.join(ch.affected_services)}"
+            )
+            matched.append({
+                "type": ch.change_type,
+                "description": ch.description,
+                "author": ch.author,
+                "services": list(ch.affected_services),
+            })
+        lines.append(f"\n  共命中 {len(matched)} 条")
+
         payload = {
             "keywords": kw_list,
             "event_type": event_type,
             "service": service,
-            "matched": False,
-            "match_count": 0,
+            "matched": True,
+            "match_count": len(matched),
+            "events": matched,
         }
-        return "未命中任何变更事件。" + _evidence_block(payload)
+        return "\n".join(lines) + _evidence_block(payload)
 
-    lines = ["命中的变更事件:"]
-    matched = []
-    for ch in changes:
-        lines.append(
-            f"  [{ch.change_type.upper()}] {ch.description}\n"
-            f"         执行者: {ch.author} | 影响服务: {', '.join(ch.affected_services)}"
-        )
-        matched.append({
-            "type": ch.change_type,
-            "description": ch.description,
-            "author": ch.author,
-            "services": list(ch.affected_services),
-        })
-    lines.append(f"\n  共命中 {len(matched)} 条")
-
-    payload = {
-        "keywords": kw_list,
-        "event_type": event_type,
-        "service": service,
-        "matched": True,
-        "match_count": len(matched),
-        "events": matched,
-    }
-    return "\n".join(lines) + _evidence_block(payload)
+    return match_events

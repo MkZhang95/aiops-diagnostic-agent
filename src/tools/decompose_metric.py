@@ -15,13 +15,6 @@ from langchain_core.tools import tool
 
 from src.data.simulator import DataSimulator
 
-_simulator: DataSimulator | None = None
-
-
-def set_simulator(sim: DataSimulator):
-    global _simulator
-    _simulator = sim
-
 
 def _evidence_block(payload: dict) -> str:
     return "\n\n===EVIDENCE===\n" + json.dumps(payload, ensure_ascii=False)
@@ -119,80 +112,82 @@ def _classify(gini: float) -> tuple[str, str]:
 # ---------------------------------------------------------------------------
 
 
-@tool
-def decompose_metric(metric: str, dimension: str, threshold: float = 0.7) -> str:
-    """维度贡献度分解 + GINI 集中度分析（比率型指标）。
+def make_decompose_metric_tool(simulator: DataSimulator):
+    """Create a decompose_metric tool bound to one diagnostic data source."""
 
-    工具内部会自动从数据源拉取 `metric` 在 `dimension` 维度的下钻数据，
-    用结构贡献度拆解法计算每个维度值的贡献，并用 GINI 系数判断集中度。
+    @tool("decompose_metric")
+    def decompose_metric(metric: str, dimension: str, threshold: float = 0.7) -> str:
+        """维度贡献度分解 + GINI 集中度分析（比率型指标）。
 
-    输入:
-        metric: 指标名
-        dimension: 维度名（isp / region / app_version / ...）
-        threshold: GINI 集中性阈值（默认 0.7）
+        工具内部会自动从数据源拉取 `metric` 在 `dimension` 维度的下钻数据，
+        用结构贡献度拆解法计算每个维度值的贡献，并用 GINI 系数判断集中度。
 
-    输出: 各维度贡献 + GINI 系数 + 集中程度解读 + Top 贡献者。
-    """
-    if _simulator is None:
-        return "错误：数据模拟器未初始化。" + _evidence_block({})
+        输入:
+            metric: 指标名
+            dimension: 维度名（isp / region / app_version / ...）
+            threshold: GINI 集中性阈值（默认 0.7）
 
-    breakdowns = _simulator.drill_down(metric, dimension, (0, 3600))
-    if not breakdowns:
-        payload = {"metric": metric, "dimension": dimension, "found": False}
-        return (
-            f"指标 {metric} 在维度 {dimension} 无下钻数据，无法分解。"
-            + _evidence_block(payload)
-        )
+        输出: 各维度贡献 + GINI 系数 + 集中程度解读 + Top 贡献者。
+        """
+        breakdowns = simulator.drill_down(metric, dimension, (0, 3600))
+        if not breakdowns:
+            payload = {"metric": metric, "dimension": dimension, "found": False}
+            return (
+                f"指标 {metric} 在维度 {dimension} 无下钻数据，无法分解。"
+                + _evidence_block(payload)
+            )
 
-    dim_data = [
-        {"name": b.dimension_value, "t1": b.t1_value, "t2": b.t2_value}
-        for b in breakdowns
-    ]
-    contributions = compute_structural(dim_data)
+        dim_data = [
+            {"name": b.dimension_value, "t1": b.t1_value, "t2": b.t2_value}
+            for b in breakdowns
+        ]
+        contributions = compute_structural(dim_data)
 
-    # GINI 基于贡献占比（scenarios 数据里的 contribution_ratio 和结构分解出的 ratio 等价）
-    gini = compute_gini([c["ratio"] for c in contributions])
-    level, interpretation = _classify(gini)
-    is_concentrated = gini > threshold
+        # GINI 基于贡献占比（scenarios 数据里的 contribution_ratio 和结构分解出的 ratio 等价）
+        gini = compute_gini([c["ratio"] for c in contributions])
+        level, interpretation = _classify(gini)
+        is_concentrated = gini > threshold
 
-    top1 = contributions[0] if contributions else {"name": "", "ratio": 0.0}
-    top1_contribution = round(top1["ratio"] / 100.0, 4) if contributions else 0.0
+        top1 = contributions[0] if contributions else {"name": "", "ratio": 0.0}
+        top1_contribution = round(top1["ratio"] / 100.0, 4) if contributions else 0.0
 
-    lines = [
-        f"维度分解 [{metric} / {dimension}]:",
-        f"  GINI 系数   = {gini:.3f} ({level}, 阈值 {threshold})",
-        f"  是否集中    = {'是' if is_concentrated else '否'}",
-        f"  解读        = {interpretation}",
-        "",
-        "  维度贡献（按贡献绝对值降序）:",
-    ]
-    for c in contributions:
-        lines.append(
-            f"    {c['name']}: "
-            f"贡献={c['contribution']:+.4f} "
-            f"(占比 {c['ratio']:.1f}%, 指标变化 {c['delta']:+.2f})"
-        )
+        lines = [
+            f"维度分解 [{metric} / {dimension}]:",
+            f"  GINI 系数   = {gini:.3f} ({level}, 阈值 {threshold})",
+            f"  是否集中    = {'是' if is_concentrated else '否'}",
+            f"  解读        = {interpretation}",
+            "",
+            "  维度贡献（按贡献绝对值降序）:",
+        ]
+        for c in contributions:
+            lines.append(
+                f"    {c['name']}: "
+                f"贡献={c['contribution']:+.4f} "
+                f"(占比 {c['ratio']:.1f}%, 指标变化 {c['delta']:+.2f})"
+            )
 
-    payload = {
-        "metric": metric,
-        "dimension": dimension,
-        "found": True,
-        "gini": round(gini, 4),
-        "level": level,
-        "is_concentrated": is_concentrated,
-        "top1_name": top1["name"],
-        "top1_contribution": top1_contribution,
-        "total_contribution": round(
-            sum(c["contribution"] for c in contributions), 4
-        ),
-        "contributions": [
-            {
-                "name": c["name"],
-                "contribution": round(c["contribution"], 4),
-                "ratio_pct": round(c["ratio"], 2),
-                "delta": round(c["delta"], 4),
-            }
-            for c in contributions
-        ],
-    }
-    return "\n".join(lines) + _evidence_block(payload)
+        payload = {
+            "metric": metric,
+            "dimension": dimension,
+            "found": True,
+            "gini": round(gini, 4),
+            "level": level,
+            "is_concentrated": is_concentrated,
+            "top1_name": top1["name"],
+            "top1_contribution": top1_contribution,
+            "total_contribution": round(
+                sum(c["contribution"] for c in contributions), 4
+            ),
+            "contributions": [
+                {
+                    "name": c["name"],
+                    "contribution": round(c["contribution"], 4),
+                    "ratio_pct": round(c["ratio"], 2),
+                    "delta": round(c["delta"], 4),
+                }
+                for c in contributions
+            ],
+        }
+        return "\n".join(lines) + _evidence_block(payload)
+
+    return decompose_metric

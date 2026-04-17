@@ -11,13 +11,6 @@ from langchain_core.tools import tool
 
 from src.data.simulator import DataSimulator
 
-_simulator: DataSimulator | None = None
-
-
-def set_simulator(sim: DataSimulator):
-    global _simulator
-    _simulator = sim
-
 
 def _evidence_block(payload: dict) -> str:
     return "\n\n===EVIDENCE===\n" + json.dumps(payload, ensure_ascii=False)
@@ -26,58 +19,60 @@ def _evidence_block(payload: dict) -> str:
 _RELEASE_KEYWORDS = ("发版", "release", "deploy", "上线", "灰度", "发布")
 
 
-@tool
-def query_events(event_type: str = "", service: str = "") -> str:
-    """查询告警时间窗口内的变更事件（代码发布、配置变更、扩缩容等）。
+def make_query_events_tool(simulator: DataSimulator):
+    """Create a query_events tool bound to one diagnostic data source."""
 
-    输入:
-        event_type: 可选，按事件类型过滤（deployment / config / scaling）
-        service: 可选，按服务名过滤
+    @tool("query_events")
+    def query_events(event_type: str = "", service: str = "") -> str:
+        """查询告警时间窗口内的变更事件（代码发布、配置变更、扩缩容等）。
 
-    输出: 事件列表 + 类型分布、是否包含发版/配置变更等。
-    """
-    if _simulator is None:
-        return "错误：数据模拟器未初始化。" + _evidence_block({})
+        输入:
+            event_type: 可选，按事件类型过滤（deployment / config / scaling）
+            service: 可选，按服务名过滤
 
-    changes = _simulator.get_changes(0, 3600, service or None)
-    if event_type:
-        changes = [ch for ch in changes if ch.change_type == event_type]
+        输出: 事件列表 + 类型分布、是否包含发版/配置变更等。
+        """
+        changes = simulator.get_changes(0, 3600, service or None)
+        if event_type:
+            changes = [ch for ch in changes if ch.change_type == event_type]
 
-    if not changes:
+        if not changes:
+            payload = {
+                "event_type_filter": event_type,
+                "service_filter": service,
+                "count": 0,
+                "has_changes": False,
+                "has_config_change": False,
+                "has_deployment": False,
+                "has_release": False,
+            }
+            return "指定条件下未发现变更事件。" + _evidence_block(payload)
+
+        lines = ["变更事件查询结果:"]
+        for ch in changes:
+            lines.append(
+                f"  [{ch.change_type.upper()}] {ch.description}\n"
+                f"         执行者: {ch.author} | 影响服务: {', '.join(ch.affected_services)}"
+            )
+        lines.append(f"\n  共 {len(changes)} 个事件")
+
+        type_counter = Counter(ch.change_type for ch in changes)
+        has_deployment = type_counter.get("deployment", 0) > 0
+        has_release = has_deployment or any(
+            any(kw in ch.description.lower() for kw in _RELEASE_KEYWORDS)
+            for ch in changes
+        )
+
         payload = {
             "event_type_filter": event_type,
             "service_filter": service,
-            "count": 0,
-            "has_changes": False,
-            "has_config_change": False,
-            "has_deployment": False,
-            "has_release": False,
+            "count": len(changes),
+            "has_changes": True,
+            "change_types": dict(type_counter),
+            "has_config_change": type_counter.get("config", 0) > 0,
+            "has_deployment": has_deployment,
+            "has_release": has_release,
         }
-        return "指定条件下未发现变更事件。" + _evidence_block(payload)
+        return "\n".join(lines) + _evidence_block(payload)
 
-    lines = ["变更事件查询结果:"]
-    for ch in changes:
-        lines.append(
-            f"  [{ch.change_type.upper()}] {ch.description}\n"
-            f"         执行者: {ch.author} | 影响服务: {', '.join(ch.affected_services)}"
-        )
-    lines.append(f"\n  共 {len(changes)} 个事件")
-
-    type_counter = Counter(ch.change_type for ch in changes)
-    has_deployment = type_counter.get("deployment", 0) > 0
-    has_release = has_deployment or any(
-        any(kw in ch.description.lower() for kw in _RELEASE_KEYWORDS)
-        for ch in changes
-    )
-
-    payload = {
-        "event_type_filter": event_type,
-        "service_filter": service,
-        "count": len(changes),
-        "has_changes": True,
-        "change_types": dict(type_counter),
-        "has_config_change": type_counter.get("config", 0) > 0,
-        "has_deployment": has_deployment,
-        "has_release": has_release,
-    }
-    return "\n".join(lines) + _evidence_block(payload)
+    return query_events
