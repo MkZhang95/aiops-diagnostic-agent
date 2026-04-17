@@ -113,3 +113,4 @@ class AgentState(TypedDict):
     evidences: list[Evidence]
     root_causes: list[RootCause]
     iteration: int
+    tool_calls_valid: bool

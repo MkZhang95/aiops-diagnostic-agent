@@ -1,8 +1,8 @@
 """Agent Graph 定义 — Phase 2 版本
 
 两阶段架构:
-  Phase 1 (采集): init_plan → analyze_alert → agent_node ⇄ tool_node
-                  → update_checklist → verify_completeness → (自由探索)
+  Phase 1 (采集): init_plan → analyze_alert → agent_node → validate_tool_calls
+                  ⇄ tool_node → update_checklist → verify_completeness
   Phase 2 (归因): match_scenarios → diagnose → END
 """
 
@@ -18,6 +18,7 @@ from src.agent.nodes import (
     make_init_plan,
     make_match_scenarios,
     update_checklist,
+    validate_tool_calls,
     verify_completeness,
 )
 from src.agent.state import AgentState
@@ -40,6 +41,7 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     graph.add_node("init_plan", make_init_plan(runbook_dir))
     graph.add_node("analyze_alert", make_analyze_alert(llm))
     graph.add_node("agent_node", make_agent_node(llm, tools))
+    graph.add_node("validate_tool_calls", validate_tool_calls)
     graph.add_node("tool_node", ToolNode(tools))
     graph.add_node("update_checklist", update_checklist)
     graph.add_node("verify_completeness", verify_completeness)
@@ -53,13 +55,23 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     graph.add_edge("init_plan", "analyze_alert")
     graph.add_edge("analyze_alert", "agent_node")
 
-    # agent_node 之后：有工具调用 → tool_node，否则 → verify_completeness
+    # agent_node 之后：有工具调用 → validate_tool_calls，否则 → verify_completeness
     graph.add_conditional_edges(
         "agent_node",
         _route_after_agent,
         {
-            "tool_node": "tool_node",
+            "validate_tool_calls": "validate_tool_calls",
             "verify_completeness": "verify_completeness",
+        },
+    )
+
+    # validate_tool_calls 之后：合法 → tool_node；非法 → 回 agent_node 重试
+    graph.add_conditional_edges(
+        "validate_tool_calls",
+        _route_after_validate,
+        {
+            "tool_node": "tool_node",
+            "agent_node": "agent_node",
         },
     )
 
@@ -94,7 +106,7 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
 def _route_after_agent(state: dict) -> str:
     """agent_node 之后的路由
 
-    - 如果最后一条 AI 消息包含 tool_calls → 执行工具
+    - 如果最后一条 AI 消息包含 tool_calls → 先做 Runbook Gate 校验
     - 否则 → 进入完整性验证
     """
     messages = state.get("messages", [])
@@ -103,9 +115,16 @@ def _route_after_agent(state: dict) -> str:
 
     last_msg = messages[-1]
     if hasattr(last_msg, "tool_calls") and last_msg.tool_calls:
-        return "tool_node"
+        return "validate_tool_calls"
 
     return "verify_completeness"
+
+
+def _route_after_validate(state: dict) -> str:
+    """validate_tool_calls 之后的路由"""
+    if state.get("tool_calls_valid", True):
+        return "tool_node"
+    return "agent_node"
 
 
 def _route_after_verify(state: dict) -> str:

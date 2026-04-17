@@ -88,6 +88,7 @@ def main():
         "evidences": [],
         "root_causes": [],
         "iteration": 0,
+        "tool_calls_valid": True,
     }
 
     # 流式输出 Agent 推理过程 + token 统计

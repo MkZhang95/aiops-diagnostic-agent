@@ -1,8 +1,8 @@
 """Agent 节点定义 — Phase 2 版本
 
 两阶段架构:
-  Phase 1 (采集): init_plan → analyze_alert → agent_node ⇄ tool_node
-                  → update_checklist → verify_completeness → (自由探索)
+  Phase 1 (采集): init_plan → analyze_alert → agent_node → validate_tool_calls
+                  ⇄ tool_node → update_checklist → verify_completeness
   Phase 2 (归因): match_scenarios → diagnose → END
 """
 
@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 from datetime import datetime
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
 from src.agent.prompts import DIAGNOSE_PROMPT, SYSTEM_PROMPT
 from src.knowledge.rule_matcher import RuleMatcher
@@ -45,6 +45,7 @@ def make_init_plan(runbook_dir: str = "runbooks"):
                 "matched_scenarios": [],
                 "phase": "collecting",
                 "iteration": 0,
+                "tool_calls_valid": True,
             }
 
         # 转为 dict 存入 State
@@ -78,6 +79,7 @@ def make_init_plan(runbook_dir: str = "runbooks"):
             "matched_scenarios": [],
             "phase": "collecting",
             "iteration": 0,
+            "tool_calls_valid": True,
         }
 
     return init_plan
@@ -250,6 +252,75 @@ def update_checklist(state: dict) -> dict:
     return {
         "checklist": checklist,
         "evidence_pool": evidence_pool,
+    }
+
+
+def validate_tool_calls(state: dict) -> dict:
+    """Validate LLM tool calls against the current ready checklist steps.
+
+    The LLM can propose actions, but the program owns execution safety:
+    - tool calls must match a pending checklist step;
+    - all dependencies of that step must already be done;
+    - the call arguments must match the Runbook parameters.
+
+    Invalid calls are not executed. We append ToolMessages for the rejected
+    calls so the chat history remains valid for tool-calling models.
+    """
+    messages = state.get("messages", [])
+    if not messages:
+        return {"tool_calls_valid": True}
+
+    last_msg = messages[-1]
+    tool_calls = getattr(last_msg, "tool_calls", None) or []
+    if not tool_calls:
+        return {"tool_calls_valid": True}
+
+    checklist = state.get("checklist", [])
+    if not checklist:
+        # No Runbook means free-reasoning mode; keep existing behavior.
+        return {"tool_calls_valid": True}
+
+    ready_steps = _get_ready_checklist_steps(checklist)
+    invalid_reasons = []
+    for tc in tool_calls:
+        tc_name = tc.get("name", "")
+        tc_args = tc.get("args", {}) or {}
+        matched_ready = next(
+            (step for step in ready_steps if _matches_step(tc_name, tc_args, step)),
+            None,
+        )
+        if matched_ready is None:
+            invalid_reasons.append(_format_invalid_tool_call(tc_name, tc_args, checklist))
+
+    if not invalid_reasons:
+        return {"tool_calls_valid": True}
+
+    ready_text = _format_ready_steps_for_gate(ready_steps)
+    reason_text = "\n".join(f"- {reason}" for reason in invalid_reasons)
+    guidance = (
+        "工具调用已被系统拦截，未执行。\n\n"
+        "原因：本轮工具调用没有完全匹配当前 ready 的 Runbook 步骤。\n\n"
+        f"{reason_text}\n\n"
+        "当前只允许调用以下步骤：\n"
+        f"{ready_text}\n\n"
+        "请重新选择工具调用，必须原样使用清单里的 action 和 params。"
+    )
+
+    rejected_results = [
+        ToolMessage(
+            content=(
+                "工具调用被 Runbook Gate 拦截，未执行。"
+                "请根据后续系统提示重新调用当前 ready 的步骤。"
+            ),
+            tool_call_id=tc.get("id", ""),
+            name=tc.get("name", "tool"),
+        )
+        for tc in tool_calls
+    ]
+
+    return {
+        "messages": rejected_results + [SystemMessage(content=guidance)],
+        "tool_calls_valid": False,
     }
 
 
@@ -434,6 +505,7 @@ def _matches_step(tool_name: str, tool_args: dict, step: dict) -> bool:
     匹配逻辑：
     1. 工具名称必须匹配
     2. step 中定义的 params 的每个 key-value 都必须在 tool_args 中出现
+    3. tool_args 不能包含 Runbook 未声明的非空参数，避免下钻调用误匹配整体查询
     """
     if tool_name != step["action"]:
         return False
@@ -443,7 +515,97 @@ def _matches_step(tool_name: str, tool_args: dict, step: dict) -> bool:
         if str(tool_args.get(key, "")) != str(value):
             return False
 
+    for key, value in tool_args.items():
+        if key in step_params:
+            continue
+        if value not in ("", None, [], {}):
+            return False
+
     return True
+
+
+def _get_ready_checklist_steps(checklist: list[dict]) -> list[dict]:
+    """Return pending checklist steps whose dependencies are done."""
+    done_ids = {item["id"] for item in checklist if item.get("status") == "done"}
+    ready = []
+    for item in checklist:
+        if item.get("status", "pending") != "pending":
+            continue
+        if all(dep in done_ids for dep in item.get("depends_on", [])):
+            ready.append(item)
+    return ready
+
+
+def _format_ready_steps_for_gate(ready_steps: list[dict]) -> str:
+    if not ready_steps:
+        return "- 暂无 ready 步骤。请先检查 checklist 状态。"
+
+    lines = []
+    for step in ready_steps:
+        params = step.get("params", {})
+        if params:
+            params_str = ", ".join(f"{k}={v}" for k, v in params.items())
+        else:
+            params_str = ""
+        lines.append(
+            f"- {step['id']}: {step['action']}({params_str}) "
+            f"[{step.get('priority', 'should').upper()}]"
+        )
+    return "\n".join(lines)
+
+
+def _format_invalid_tool_call(tool_name: str, tool_args: dict, checklist: list[dict]) -> str:
+    matching_action_steps = [
+        step for step in checklist
+        if step.get("action") == tool_name and step.get("status") == "pending"
+    ]
+    if not matching_action_steps:
+        return f"{tool_name}({tool_args}) 不属于任何 pending checklist 步骤。"
+
+    exact_pending_steps = [
+        step for step in matching_action_steps
+        if _matches_step(tool_name, tool_args, step)
+    ]
+    if exact_pending_steps:
+        blocked = exact_pending_steps[0]
+        missing_deps = [
+            dep for dep in blocked.get("depends_on", [])
+            if not any(
+                item.get("id") == dep and item.get("status") == "done"
+                for item in checklist
+            )
+        ]
+        return (
+            f"{tool_name}({tool_args}) 对应步骤 `{blocked['id']}` "
+            f"依赖未完成: {missing_deps}"
+        )
+
+    ready_steps = _get_ready_checklist_steps(checklist)
+    ready_matching_steps = [
+        step for step in ready_steps if step.get("action") == tool_name
+    ]
+    if not ready_matching_steps:
+        blocked = matching_action_steps[0]
+        missing_deps = [
+            dep for dep in blocked.get("depends_on", [])
+            if not any(
+                item.get("id") == dep and item.get("status") == "done"
+                for item in checklist
+            )
+        ]
+        return (
+            f"{tool_name}({tool_args}) 对应步骤 `{blocked['id']}` "
+            f"依赖未完成: {missing_deps}"
+        )
+
+    expected = [
+        f"{step['id']} params={step.get('params', {})}"
+        for step in ready_matching_steps
+    ]
+    return (
+        f"{tool_name}({tool_args}) 参数不匹配当前 ready 步骤；"
+        f"期望之一: {'; '.join(expected)}"
+    )
 
 
 EVIDENCE_MARKER = "===EVIDENCE==="

@@ -51,6 +51,7 @@ def _run_scenario(scenario_name: str) -> dict:
         "evidences": [],
         "root_causes": [],
         "iteration": 0,
+        "tool_calls_valid": True,
     })
 
     return result
@@ -274,4 +275,4 @@ class TestP2PRuleMatching:
         md = render_report(state)
         assert "归因诊断报告" in md
         assert "手机分享比下降-有效覆盖度" in md
-        assert "证据池摘要" in md
+        assert "支撑证据" in md

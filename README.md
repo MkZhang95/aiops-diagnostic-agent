@@ -1,15 +1,19 @@
 # AIOps Diagnostic Agent
 
-基于 LangGraph 构建的 AIOps 智能归因分析 Agent，采用 **Checklist-Driven** 架构，将业务专家的归因经验通过声明式 YAML Runbook 编码，实现结构化、可审计的指标异常归因。
+基于 LangGraph 构建的 AIOps 智能归因分析 Agent，采用 **Checklist-Driven / Evidence-Based** 架构，将业务专家的归因经验通过声明式 YAML Runbook 编码，实现结构化、可审计、受控的指标异常归因。
+
+本项目定位不是让 LLM 自由探索线上系统，而是把传统配置化归因系统改造成一个 **受控 Agent 应用**：Agent 必须先执行专家沉淀的 Runbook 清单，完成必要证据采集；已知场景优先通过规则匹配归因；当规则未覆盖或只部分匹配时，LLM 再基于 Evidence Pool 中已有证据做兜底推理和报告生成。
 
 ## 核心特性
 
-- **Checklist-Driven 执行**：归因步骤由 YAML 采集计划定义，程序化追踪完成状态，保证不遗漏关键分析
+- **Checklist-Driven 执行**：归因步骤由 YAML 采集计划定义，程序化追踪完成状态，并通过工具调用校验保证依赖和参数合法
 - **Query / Compute 两类工具**：查询工具只取数，计算工具只计算（贡献度、公式拆解、相关性、事件命中）——职责单一，便于复用与扩展
-- **规则匹配作参考 + LLM 主导归因**：已知场景通过结构化规则快速匹配，LLM 结合证据池做最终归因，也能发现规则未覆盖的新故障模式
+- **规则优先 + LLM 兜底推理**：已知场景通过结构化规则快速匹配；未明确命中时，LLM 只能基于证据池做受控推断
 - **Evidence Pool 共享结果池**：同一分析步骤只执行一次，多场景共享结果，避免重复查数
-- **自由探索**：清单必要步骤完成后 LLM 可根据中间结果追加分析，实现真正的 ReAct 推理
-- **并发执行**：通过 `depends_on` 声明步骤间依赖，无依赖步骤支持并发调用
+- **受控 ReAct**：LLM 可以提出工具调用，但系统会按 `depends_on` 和 Runbook 参数做硬校验，非法调用不会执行
+- **并发执行**：通过 `depends_on` 声明步骤间依赖，无依赖步骤支持同轮并发调用
+- **工具上下文隔离**：每次诊断通过 tool factory 创建绑定独立数据源的工具实例，避免并发任务共享全局状态
+- **Golden Case Eval**：通过 `evals/golden_cases.yaml` 回归验证关键证据、规则命中和结构化字段，评估非 LLM 诊断链路
 - **结构化报告**：`src/report/markdown.py` 把告警 + 清单状态 + 证据池 + 场景匹配 + LLM 归因一并渲染为可审计的 Markdown
 - **多 LLM 支持**：Claude / OpenAI / 智谱 AI
 
@@ -28,25 +32,24 @@
 graph TD
     A[init_plan] -->|加载 Runbook 生成 Checklist| B[analyze_alert]
     B -->|注入告警+清单| C[agent_node]
-    C -->|有工具调用| D[tool_node]
+    C -->|有工具调用| V[validate_tool_calls]
     C -->|无工具调用| E[verify_completeness]
+    V -->|合法: ready step| D[tool_node]
+    V -->|非法: 依赖未满足/参数不匹配| C
     D --> F[update_checklist]
     F -->|写入 Evidence Pool| C
     E -->|must 未完成| C
-    E -->|must 已完成| G[自由探索: agent_node]
-    G -->|追加分析| D
-    G -->|结束采集| H[match_scenarios]
+    E -->|must 已完成| H[match_scenarios]
     H -->|规则匹配作为参考| I[diagnose]
     I -->|LLM 归因判断| J[END]
 ```
 
-### 三阶段执行流程
+### 两阶段执行流程
 
 | 阶段 | 节点 | 驱动方 | 说明 |
 |---|---|---|---|
-| 数据采集 | init_plan → agent_node ⇄ tool_node | Checklist | 按清单执行 must/should 步骤 |
-| 自由探索 | agent_node ⇄ tool_node | LLM | 根据中间结果追加分析（真正的 ReAct） |
-| 归因判断 | match_scenarios → diagnose | 规则 + LLM | 规则匹配作参考，LLM 综合证据池推理 |
+| 受控采集 | init_plan → agent_node → validate_tool_calls ⇄ tool_node | Checklist + Gate | 按清单执行步骤，依赖满足且参数匹配的工具调用才会执行 |
+| 归因判断 | match_scenarios → diagnose | 规则 + LLM | 已知场景规则优先；无明确命中时，LLM 基于证据池兜底推理 |
 
 ### 工具集（7 个，Query / Compute 两类）
 
@@ -61,6 +64,17 @@ graph TD
 | Compute | `match_events` | 按关键词/类型命中变更事件，返回 matched 布尔位 |
 
 所有工具返回"人类可读文本 + `===EVIDENCE===` JSON 证据块"双格式：前半段给 LLM 看，后半段给规则引擎精确解析。
+
+### 为什么不是让 Agent 自由探索？
+
+AIOps 归因强调可靠性、可审计性和低幻觉。完全自由的 Agent 容易编造指标名、跳过关键步骤、过度调用工具，或者生成没有证据支撑的结论。
+
+因此本项目采用 **受控 Agent** 设计：
+
+1. **Runbook 先行**：专家沉淀的必要步骤必须优先完成。
+2. **工具调用硬校验**：Agent 提出的工具调用必须匹配当前 ready 的 checklist step；依赖未满足或参数不一致时不会执行。
+3. **规则优先**：已知故障模式由结构化规则匹配，保证稳定可复现。
+4. **LLM 兜底**：只有规则未明确覆盖时，LLM 才基于 Evidence Pool 做受控推理，不允许引用证据池之外的数值、服务或事件。
 
 ### 文件结构
 
@@ -90,6 +104,7 @@ graph TD
 └── tests/
     ├── test_tools.py               # 算法单元测试
     ├── test_knowledge.py           # 知识模块单元测试
+    ├── test_golden_cases.py        # Golden case eval（非 LLM 诊断链路回归）
     └── test_scenarios.py           # 端到端场景（集成 + 规则匹配）
 ```
 
@@ -132,9 +147,21 @@ python cli.py --scenario phone_sharing_coverage_drop --llm zhipu
 # 单元测试 + 不依赖 LLM 的 E2E（规则匹配、报告渲染）
 pytest -m 'not integration' -v
 
+# Golden case eval（验证关键证据、规则命中、结构化字段）
+pytest tests/test_golden_cases.py -v
+
 # 依赖 LLM 的集成测试
 pytest -m integration -v
 ```
+
+### 评测思路
+
+本项目把评测拆成两层：
+
+1. **确定性链路评测**：`evals/golden_cases.yaml` 定义历史/模拟故障 case，验证 Runbook 工具执行、Evidence Pool 关键字段、RuleMatcher 命中结果，不依赖 LLM。
+2. **LLM 诊断评测**：集成测试可在配置 API Key 后运行，检查完整 Agent 流程和最终报告生成。
+
+这种拆分避免只凭最终自然语言报告判断效果，便于定位问题发生在数据采集、规则匹配还是 LLM 报告阶段。
 
 ## 预置场景
 
@@ -242,10 +269,10 @@ rules:
 | 程序遍历树节点调用函数 | Agent 按 Checklist 调用工具 |
 | 多场景树展平去重 | 采集计划天然去重 |
 | 结果回填各场景 | Evidence Pool 共享结果池 |
-| 规则匹配出最终结论 | 规则匹配作参考，LLM 做最终判断 |
-| 只走预定义路径 | 预定义路径 + LLM 自由探索 |
+| 规则匹配出最终结论 | 规则优先，LLM 基于证据补充触发因和未知 case 推理 |
+| 只走预定义路径 | 预定义路径优先，LLM 作为受控兜底 |
 
-核心优势：**保留了配置化系统的确定性和完整性，同时获得了 LLM 发现新故障模式的能力**。
+核心优势：**保留了配置化系统的确定性和完整性，同时用 LLM 增强未知 case 的证据解释和推理能力**。
 
 ## License
 
