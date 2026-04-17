@@ -112,8 +112,7 @@ def _route_after_verify(state: dict) -> str:
     """verify_completeness 之后的路由
 
     - phase == "diagnosing": 采集结束，进入场景匹配 + 归因
-    - phase == "exploring": must 完成，回到 agent_node 自由探索
-    - 其他: 有遗漏，回到 agent_node 继续
+    - 其他: 有遗漏 must 步骤，回到 agent_node 继续
     """
     phase = state.get("phase", "collecting")
     if phase == "diagnosing":

@@ -13,7 +13,7 @@ from datetime import datetime
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
-from src.agent.prompts import DIAGNOSE_PROMPT, FREE_EXPLORE_PROMPT, SYSTEM_PROMPT
+from src.agent.prompts import DIAGNOSE_PROMPT, SYSTEM_PROMPT
 from src.knowledge.rule_matcher import RuleMatcher
 from src.knowledge.runbook_loader import ChecklistItem, RunbookLoader
 
@@ -258,17 +258,14 @@ def verify_completeness(state: dict) -> dict:
 
     程序化节点，通过 phase 字段控制路由：
     - phase = "collecting": 有遗漏 must 步骤，回到 agent_node 继续
-    - phase = "exploring": must 步骤全完成，进入自由探索模式
     - phase = "diagnosing": 采集结束，进入 Phase 2 归因
+
+    注：不再存在 "exploring" 独立阶段。
+    MUST 完成后，如果 agent 还想追加工具调用，会在 collecting 循环里自然延续；
+    一旦 agent 不再 tool_calls，就直接进 diagnose。归因报告只在 diagnose 阶段写。
     """
     checklist = state.get("checklist", [])
     iteration = state.get("iteration", 0)
-    phase = state.get("phase", "collecting")
-
-    # 如果已经处于自由探索阶段，说明 agent 已经完成了自由探索
-    # （上一轮 agent_node 没有 tool_calls，走到 verify → 说明 agent 主动结束）
-    if phase == "exploring":
-        return {"phase": "diagnosing"}
 
     if not checklist:
         # 没有 checklist（自由推理模式），检查是否有足够工具调用
@@ -286,15 +283,12 @@ def verify_completeness(state: dict) -> dict:
     ]
 
     if not pending_must:
-        # 所有 must 步骤完成，进入自由探索模式
-        return {
-            "messages": [SystemMessage(content=FREE_EXPLORE_PROMPT)],
-            "phase": "exploring",
-        }
+        # 所有 must 步骤完成：直接进入归因阶段，不再让 agent 写总结
+        return {"phase": "diagnosing"}
 
     # 防止无限循环
     if iteration >= 10:
-        return {"phase": "exploring"}
+        return {"phase": "diagnosing"}
 
     # 有遗漏，构造提醒消息
     loader = RunbookLoader()

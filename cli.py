@@ -90,42 +90,104 @@ def main():
         "iteration": 0,
     }
 
-    # 流式输出 Agent 推理过程
+    # 流式输出 Agent 推理过程 + token 统计
     step_count = 0
     final_state = initial_state
+    token_rounds: list[dict] = []  # 每次 LLM 调用的 token 明细
+    agent_round = 0
+
+    def _collect_usage(msg, stage: str):
+        usage = getattr(msg, "usage_metadata", None) or {}
+        if not usage:
+            meta = getattr(msg, "response_metadata", {}) or {}
+            usage = meta.get("token_usage") or meta.get("usage") or {}
+        if not usage:
+            return
+        token_rounds.append({
+            "stage": stage,
+            "input": usage.get("input_tokens") or usage.get("prompt_tokens") or 0,
+            "output": usage.get("output_tokens") or usage.get("completion_tokens") or 0,
+            "total": usage.get("total_tokens") or 0,
+        })
+
     for event in graph.stream(initial_state):
         for node_name, state_update in event.items():
             step_count += 1
 
             if node_name == "agent_node":
-                # 提取 AI 的 Thought 和工具调用
+                agent_round += 1
                 messages = state_update.get("messages", [])
                 for msg in messages:
+                    _collect_usage(msg, f"agent_round_{agent_round}")
+                    console.print(
+                        f"\n[bold cyan]── Agent 第 {agent_round} 轮 ──[/bold cyan]"
+                    )
                     if hasattr(msg, "content") and msg.content:
-                        console.print("\n[bold cyan]Agent[/bold cyan]:")
+                        console.print("[yellow]Thought:[/yellow]")
                         console.print(msg.content)
                     if hasattr(msg, "tool_calls") and msg.tool_calls:
+                        console.print("[green]Action:[/green]")
                         for tc in msg.tool_calls:
-                            console.print(
-                                f"  [dim]-> 调用工具: {tc['name']}({tc.get('args', {})})[/dim]"
-                            )
+                            args_str = str(tc.get("args", {}))
+                            if len(args_str) > 300:
+                                args_str = args_str[:300] + "..."
+                            console.print(f"  → [bold]{tc['name']}[/bold]({args_str})")
+                    usage = getattr(msg, "usage_metadata", None) or {}
+                    if usage:
+                        console.print(
+                            f"  [dim]tokens: in={usage.get('input_tokens', 0)} "
+                            f"out={usage.get('output_tokens', 0)} "
+                            f"total={usage.get('total_tokens', 0)}[/dim]"
+                        )
 
             elif node_name == "tool_node":
                 messages = state_update.get("messages", [])
+                console.print("[magenta]Observation:[/magenta]")
                 for msg in messages:
+                    tool_name = getattr(msg, "name", "tool")
                     if hasattr(msg, "content") and msg.content:
                         content = str(msg.content)
-                        if len(content) > 200:
-                            content = content[:200] + "..."
-                        console.print(f"  [dim]<- {content}[/dim]")
+                        if "===EVIDENCE===" in content:
+                            content = content.split("===EVIDENCE===")[0].rstrip()
+                        if len(content) > 300:
+                            content = content[:300] + "..."
+                        console.print(f"  [dim]← {tool_name}: {content}[/dim]")
+
+            elif node_name == "match_scenarios":
+                matched = state_update.get("matched_scenarios", [])
+                console.print(
+                    f"\n[bold magenta]── 场景规则匹配 ──[/bold magenta] "
+                    f"命中 {len(matched)} 条"
+                )
 
             elif node_name == "diagnose":
                 messages = state_update.get("messages", [])
+                console.print("\n[bold green]── 归因判断（diagnose）──[/bold green]")
                 for msg in messages:
+                    _collect_usage(msg, "diagnose")
+                    usage = getattr(msg, "usage_metadata", None) or {}
+                    if usage:
+                        console.print(
+                            f"[dim]tokens: in={usage.get('input_tokens', 0)} "
+                            f"out={usage.get('output_tokens', 0)} "
+                            f"total={usage.get('total_tokens', 0)}[/dim]"
+                        )
                     if hasattr(msg, "content") and msg.content:
                         report = msg.content
 
             final_state.update(state_update)
+
+    # 汇总 token
+    total_in = sum(r["input"] for r in token_rounds)
+    total_out = sum(r["output"] for r in token_rounds)
+    total_all = sum(r["total"] for r in token_rounds) or (total_in + total_out)
+    final_state["_token_stats"] = {
+        "rounds": token_rounds,
+        "total_input": total_in,
+        "total_output": total_out,
+        "total": total_all,
+        "model": llm.model_name,
+    }
 
     elapsed = time.time() - start_time
 
@@ -149,10 +211,24 @@ def main():
     # 统计
     evidence_count = len(final_state.get("evidence_pool", {}))
     matched_count = len(final_state.get("matched_scenarios", []))
+    stats = final_state.get("_token_stats", {})
     console.print(
         f"\n[dim]耗时: {elapsed:.1f}s | "
         f"Evidence: {evidence_count} 条 | "
         f"匹配场景: {matched_count} 个[/dim]"
+    )
+    console.print("\n[bold]── Token 消耗明细 ──[/bold]")
+    console.print(f"  模型: [cyan]{stats.get('model', '-')}[/cyan]")
+    for r in stats.get("rounds", []):
+        console.print(
+            f"  {r['stage']:<20} in={r['input']:>6}  out={r['output']:>5}  "
+            f"total={r['total']:>6}"
+        )
+    console.print(
+        f"  [bold]合计[/bold]:              "
+        f"in={stats.get('total_input', 0):>6}  "
+        f"out={stats.get('total_output', 0):>5}  "
+        f"total={stats.get('total', 0):>6}"
     )
 
 

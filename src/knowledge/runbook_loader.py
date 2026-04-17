@@ -141,11 +141,19 @@ class RunbookLoader:
             f"(必要步骤: {must_done}/{must_total})\n"
         )
 
-        # 逐项列出
+        # 逐项列出（同时给出明确的 action + params，避免模型凭空猜测参数名）
         for item in checklist:
             icon = "✅" if item.is_done() else "⬜"
             tag = f"[{item.priority.upper()}]"
             lines.append(f"{icon} {tag} {item.name}")
+            if item.action:
+                if item.params:
+                    params_str = ", ".join(
+                        f"{k}={v}" for k, v in item.params.items()
+                    )
+                    lines.append(f"    → 调用: `{item.action}({params_str})`")
+                else:
+                    lines.append(f"    → 调用: `{item.action}()`")
 
         # 分析可并行步骤
         ready_steps = self._get_ready_steps(checklist)
