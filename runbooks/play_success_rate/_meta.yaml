@@ -7,3 +7,19 @@ related_metrics:
   - buffering_rate
   - network_quality
 owner: "视频质量团队"
+
+# 路由元信息：用于 route_metric 节点把自然语言映射到本指标
+aliases:
+  - 播放成功率
+  - 播放失败率
+  - 起播失败
+  - 起播成功率
+  - 视频打不开
+  - 播不出来
+symptoms:
+  - 用户反馈视频点击后无法起播
+  - 起播 loading 一直转圈
+  - 播放器报错弹窗（CDN/Player error）增多
+not_for:
+  - 播放过程中卡顿（属于卡顿率指标，不是起播失败）
+  - 仅 P2P 带宽占比波动而播放正常

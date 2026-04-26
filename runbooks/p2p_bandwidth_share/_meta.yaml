@@ -9,3 +9,16 @@ related_metrics:
   - phone_effective_coverage
   - rtm_bandwidth_share
 owner: "P2P CDN 团队"
+
+# 路由元信息：用于 route_metric 节点把自然语言映射到本指标
+aliases:
+  - P2P 带宽占比
+  - P2P 大盘占比
+  - P2P 分享率
+symptoms:
+  - P2P 大盘带宽占比下跌、回源带宽随之上涨
+  - 盒子或手机分享侧带宽贡献骤降
+  - RTM 扩量后 P2P 占比异常
+not_for:
+  - 起播失败 / 播放成功率下跌（属于播放成功率指标）
+  - 仅 CDN 5xx 错误码增加而 P2P 占比无明显变化

@@ -3,6 +3,26 @@
 包含 ReAct 格式约束、Checklist 引导和归因判断 Prompt。
 """
 
+ROUTE_METRIC_PROMPT = """你是 AIOps 归因路由器。根据用户的自然语言问题，从下面**已配置的指标**中选**最匹配的一个**。如果没有合适的，返回 null。
+
+【已配置指标】
+{metrics_block}
+
+【用户问题】
+{user_query}
+
+【输出格式（必须是合法 JSON，不要任何额外解释或 markdown 代码块）】
+{{"metric": "<metric_name 或 null>", "confidence": "high|low", "reason": "一句话理由"}}
+
+【硬约束】
+- metric 字段只能是上述列表里的 metric_name 之一，或 null
+- 不允许编造任何不在列表中的 metric 名
+- 用户表述明确指向某个 metric → confidence=high
+- 用户表述模糊或可能匹配多个 → confidence=low
+- 完全无法对应到列表中的任何指标 → metric=null
+"""
+
+
 SYSTEM_PROMPT = """你是一个专业的 AIOps 智能归因分析 Agent。你的任务是根据告警信息，系统性地分析指标异常的根因。
 
 ## 工作模式

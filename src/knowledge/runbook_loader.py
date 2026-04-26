@@ -33,12 +33,19 @@ class ChecklistItem:
 
 @dataclass
 class RunbookMeta:
-    """指标元信息"""
+    """指标元信息
+
+    路由相关字段（aliases / symptoms / not_for）由 route_metric 节点使用，
+    Runbook 自描述其语义，新增指标无需改路由代码或 prompt。
+    """
 
     metric: str
     display_name: str
     description: str = ""
     related_metrics: list[str] = field(default_factory=list)
+    aliases: list[str] = field(default_factory=list)
+    symptoms: list[str] = field(default_factory=list)
+    not_for: list[str] = field(default_factory=list)
 
 
 class RunbookLoader:
@@ -59,6 +66,9 @@ class RunbookLoader:
             display_name=data.get("display_name", metric),
             description=data.get("description", ""),
             related_metrics=data.get("related_metrics", []),
+            aliases=data.get("aliases", []),
+            symptoms=data.get("symptoms", []),
+            not_for=data.get("not_for", []),
         )
 
     def load_analysis_plan(self, metric: str) -> list[ChecklistItem]:

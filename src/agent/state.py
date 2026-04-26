@@ -23,12 +23,12 @@ class AlertEvent(BaseModel):
     """告警事件"""
 
     alert_id: str = Field(description="告警ID")
-    metric_name: str = Field(description="指标名称")
-    severity: str = Field(description="告警级别: critical/warning/info")
-    description: str = Field(description="告警描述")
-    timestamp: str = Field(description="告警触发时间")
-    current_value: float = Field(description="当前指标值")
-    baseline_value: float = Field(description="基线值")
+    metric_name: str = Field(default="", description="指标名称（NL 模式下由 route_metric 填充）")
+    severity: str = Field(default="warning", description="告警级别: critical/warning/info")
+    description: str = Field(default="", description="告警描述")
+    timestamp: str = Field(default="", description="告警触发时间")
+    current_value: float = Field(default=0.0, description="当前指标值")
+    baseline_value: float = Field(default=0.0, description="基线值")
     tags: dict[str, str] = Field(default_factory=dict, description="标签")
 
 
@@ -106,6 +106,8 @@ class AgentState(TypedDict):
 
     messages: Annotated[list[AnyMessage], add_messages]
     alert: AlertEvent
+    user_query: str  # NL 模式的原始问题；场景模式下为空
+    route_status: str  # routed / unknown / bypass（route_metric 节点写入）
     phase: str  # collecting / exploring / diagnosing
     checklist: list[dict]  # ChecklistItemState 序列化后的 dict list
     evidence_pool: dict[str, Any]

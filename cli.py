@@ -8,8 +8,10 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from src.agent import build_graph
+from src.agent.nodes import make_route_metric
 from src.agent.state import AlertEvent
 from src.data import DataSimulator, list_scenarios
+from src.data.scenarios import SCENARIOS
 from src.llm import get_llm
 from src.report import save_report
 from src.tools import get_all_tools
@@ -31,30 +33,91 @@ def _make_alert_event(alert_dict: dict) -> AlertEvent:
     )
 
 
+def _pick_scenario_for_metric(metric: str) -> str | None:
+    """根据 routed metric 找一个匹配的预置场景，给 simulator 用作数据源。"""
+    for name, scenario in SCENARIOS.items():
+        alert = scenario.get("alert", {})
+        if alert.get("metric_name") == metric:
+            return name
+    return None
+
+
+def _route_nl_query(query: str, llm, runbook_dir: str = "runbooks") -> dict:
+    """在 CLI 阶段先做一次 NL 路由，决定后续 simulator 用哪个 scenario。
+
+    复用 graph 里的 make_route_metric 节点，避免逻辑分裂。
+    返回的 state_update 含 route_status / alert / messages。
+    """
+    router = make_route_metric(llm, runbook_dir)
+    initial = {
+        "alert": AlertEvent(alert_id="nl_pre", metric_name=""),
+        "user_query": query,
+    }
+    return router(initial)
+
+
 def main():
     parser = argparse.ArgumentParser(description="AIOps Diagnostic Agent")
-    parser.add_argument("--scenario", type=str, help="预置场景名称")
+    parser.add_argument("--scenario", type=str, help="预置场景名称（场景模式）")
+    parser.add_argument(
+        "--query",
+        type=str,
+        help="自然语言归因问题（NL 模式，例：'帮我归因播放成功率'）",
+    )
     parser.add_argument("--llm", type=str, default=None, help="LLM: claude/openai/zhipu")
     parser.add_argument("--verbose", action="store_true", help="详细模式")
     args = parser.parse_args()
 
     console.print(Panel("[bold]AIOps Diagnostic Agent v0.2.0[/bold]", style="blue"))
 
-    # 选择场景
-    if args.scenario:
-        scenario_name = args.scenario
-    else:
-        scenarios = list_scenarios()
-        console.print("\n[bold]选择诊断场景:[/bold]")
-        for i, name in enumerate(scenarios, 1):
-            console.print(f"  {i}. {name}")
-        choice = input("\n请输入编号 (默认 1): ").strip() or "1"
-        scenario_name = scenarios[int(choice) - 1]
+    llm = get_llm(provider=args.llm)
+    console.print(f"  模型: [cyan]{llm.model_name}[/cyan]")
 
-    # 加载场景数据
-    simulator = DataSimulator(scenario_name)
-    alert_event = _make_alert_event(simulator.alert)
-    console.print(f"  场景: [cyan]{scenario_name}[/cyan]")
+    user_query = ""
+
+    # ---- 模式选择 ----
+    if args.query:
+        # NL 模式：先路由再决定 scenario
+        console.print(f"\n[bold]NL 模式[/bold]: {args.query}")
+        route_result = _route_nl_query(args.query, llm)
+        for msg in route_result.get("messages", []):
+            console.print(f"  {msg.content}")
+
+        if route_result.get("route_status") != "routed":
+            console.print("\n[red]路由失败，已退出。[/red]")
+            return
+
+        routed_metric = route_result["alert"].metric_name
+        scenario_name = _pick_scenario_for_metric(routed_metric)
+        if scenario_name is None:
+            console.print(
+                f"\n[red]路由到 metric={routed_metric}，但没有任何预置场景能提供数据。[/red]"
+            )
+            return
+
+        simulator = DataSimulator(scenario_name)
+        alert_event = _make_alert_event(simulator.alert)
+        alert_event.description = args.query  # 用户原话进入 description
+        user_query = args.query
+        console.print(
+            f"  数据源场景: [cyan]{scenario_name}[/cyan] "
+            f"(metric={routed_metric})"
+        )
+    else:
+        # 场景模式
+        if args.scenario:
+            scenario_name = args.scenario
+        else:
+            scenarios = list_scenarios()
+            console.print("\n[bold]选择诊断场景:[/bold]")
+            for i, name in enumerate(scenarios, 1):
+                console.print(f"  {i}. {name}")
+            choice = input("\n请输入编号 (默认 1): ").strip() or "1"
+            scenario_name = scenarios[int(choice) - 1]
+
+        simulator = DataSimulator(scenario_name)
+        alert_event = _make_alert_event(simulator.alert)
+        console.print(f"  场景: [cyan]{scenario_name}[/cyan]")
 
     console.print(Panel(
         f"[bold red]{alert_event.description}[/bold red]\n"
@@ -64,10 +127,6 @@ def main():
         f"级别: {alert_event.severity}",
         title="告警信息",
     ))
-
-    # 构建 Agent
-    llm = get_llm(provider=args.llm)
-    console.print(f"  模型: [cyan]{llm.model_name}[/cyan]")
 
     tools = get_all_tools(simulator)
     console.print(f"  工具: {len(tools)} 个\n")
@@ -81,6 +140,8 @@ def main():
     initial_state = {
         "messages": [],
         "alert": alert_event,
+        "user_query": user_query,
+        "route_status": "",
         "phase": "collecting",
         "checklist": [],
         "evidence_pool": {},

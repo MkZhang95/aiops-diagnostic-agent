@@ -12,11 +12,13 @@ from langgraph.graph import END, StateGraph
 from langgraph.prebuilt import ToolNode
 
 from src.agent.nodes import (
+    ROUTE_OK,
     make_agent_node,
     make_analyze_alert,
     make_diagnose,
     make_init_plan,
     make_match_scenarios,
+    make_route_metric,
     update_checklist,
     validate_tool_calls,
     verify_completeness,
@@ -37,6 +39,9 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     """
     graph = StateGraph(AgentState)
 
+    # ---- Phase 0: NL 路由（场景模式下自动 bypass） ----
+    graph.add_node("route_metric", make_route_metric(llm, runbook_dir))
+
     # ---- Phase 1: 数据采集 ----
     graph.add_node("init_plan", make_init_plan(runbook_dir))
     graph.add_node("analyze_alert", make_analyze_alert(llm))
@@ -51,7 +56,17 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
     graph.add_node("diagnose", make_diagnose(llm))
 
     # ---- 连线 ----
-    graph.set_entry_point("init_plan")
+    graph.set_entry_point("route_metric")
+
+    # route_metric → init_plan（路由成功 / bypass）或 END（unknown）
+    graph.add_conditional_edges(
+        "route_metric",
+        _route_after_router,
+        {
+            "init_plan": "init_plan",
+            "end": END,
+        },
+    )
     graph.add_edge("init_plan", "analyze_alert")
     graph.add_edge("analyze_alert", "agent_node")
 
@@ -101,6 +116,14 @@ def build_graph(llm, tools, runbook_dir: str = "runbooks"):
 # ============================================================
 # 路由函数
 # ============================================================
+
+
+def _route_after_router(state: dict) -> str:
+    """route_metric 之后：路由成功 / bypass 进 init_plan，未知则结束。"""
+    status = state.get("route_status", ROUTE_OK)
+    if status == "unknown":
+        return "end"
+    return "init_plan"
 
 
 def _route_after_agent(state: dict) -> str:

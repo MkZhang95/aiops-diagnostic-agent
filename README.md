@@ -6,6 +6,7 @@
 
 ## 核心特性
 
+- **NL 自然语言入口**：用户用"播放成功率最近下降了，帮我归因"这种自然语言触发归因；路由层 LLM 在已配置 metric 中单选，硬校验防止编造；新增指标只需补 `_meta.yaml` 的 `aliases / symptoms / not_for`，0 路由代码改动
 - **Checklist-Driven 执行**：归因步骤由 YAML 采集计划定义，程序化追踪完成状态，并通过工具调用校验保证依赖和参数合法
 - **Query / Compute 两类工具**：查询工具只取数，计算工具只计算（贡献度、公式拆解、相关性、事件命中）——职责单一，便于复用与扩展
 - **规则优先 + LLM 兜底推理**：已知场景通过结构化规则快速匹配；未明确命中时，LLM 只能基于证据池做受控推断
@@ -30,7 +31,10 @@
 
 ```mermaid
 graph TD
-    A[init_plan] -->|加载 Runbook 生成 Checklist| B[analyze_alert]
+    R[route_metric] -->|NL 模式: LLM 选 metric| A[init_plan]
+    R -->|场景模式: bypass| A
+    R -->|未匹配任何 Runbook| Z[END]
+    A -->|加载 Runbook 生成 Checklist| B[analyze_alert]
     B -->|注入告警+清单| C[agent_node]
     C -->|有工具调用| V[validate_tool_calls]
     C -->|无工具调用| E[verify_completeness]
@@ -48,6 +52,7 @@ graph TD
 
 | 阶段 | 节点 | 驱动方 | 说明 |
 |---|---|---|---|
+| NL 路由 | route_metric | LLM 单选 + 硬校验 | NL 模式把自然语言映射到已配置 metric；场景模式自动 bypass，0 LLM 调用 |
 | 受控采集 | init_plan → agent_node → validate_tool_calls ⇄ tool_node | Checklist + Gate | 按清单执行步骤，依赖满足且参数匹配的工具调用才会执行 |
 | 归因判断 | match_scenarios → diagnose | 规则 + LLM | 已知场景规则优先；无明确命中时，LLM 基于证据池兜底推理 |
 
@@ -137,7 +142,14 @@ python cli.py --scenario play_success_rate_drop --llm claude
 python cli.py --scenario buffering_rate_rise
 python cli.py --scenario first_frame_latency_degradation
 python cli.py --scenario phone_sharing_coverage_drop --llm zhipu
+
+# NL 模式：自然语言触发归因（路由层自动选 metric）
+python cli.py --query "播放成功率最近下降了，帮我归因"
+python cli.py --query "P2P 大盘带宽占比掉了"
+python cli.py --query "今天天气怎么样"   # 未配置 → 返回友好提示并退出
 ```
+
+> NL 模式与场景模式入口不同、后续流程一致。NL 模式会先做一次 LLM 路由把自然语言映射到已配置 metric；场景模式下路由节点自动 bypass，0 LLM 调用，保证 Eval 可复现。
 
 输出会在 `output/report_<scenario>_<timestamp>.md` 保存一份结构化报告（告警 / 清单状态 / 证据池 / 规则匹配 / LLM 归因五段式）。
 
@@ -273,6 +285,30 @@ rules:
 | 只走预定义路径 | 预定义路径优先，LLM 作为受控兜底 |
 
 核心优势：**保留了配置化系统的确定性和完整性，同时用 LLM 增强未知 case 的证据解释和推理能力**。
+
+## 已知限制
+
+当前为 Demo 实现，刻意收敛了边界，便于聚焦核心能力展示。落地真实生产环境前需要补的工作：
+
+- **单时刻快照**：`AlertEvent.timestamp` 字段存在但下游不消费；工具签名没有 `time_range` 参数；`DataSimulator` 一个 scenario 绑定一组固定时序数据。无法回答"3 月 1 日的异常归因"这类时间限定问题。
+- **数据源是模拟器**：`DataSimulator` 输出预置场景，不接真实 Hive / Prometheus / Loki。但工具是 factory 注入数据源，替换实现即可，业务工具代码 0 改动。
+- **NL 路由强制单选**：不支持多 metric 联合归因；低置信度场景不反问，直接路由。
+- **不解析时间表达式**：用户说"昨天"、"3 月 1 日"、"上周三"会被路由层忽略。
+- **未接告警系统**：入口是 CLI，未对接 Prometheus Alertmanager / 飞书 webhook / Kafka 告警流。
+
+## Roadmap
+
+| 优先级 | 能力 | 改造范围 | 预计工作量 |
+|---|---|---|---|
+| P0 | 时间维度支持 | 工具签名加 `time_range`、`AlertEvent` 加 `alert_time`、router prompt 加时间提取 | ~50 行 |
+| P0 | 接入真实数据源（Hive / Prometheus） | 实现 `BaseDataSource` 接口替换 `DataSimulator`，工具代码不变 | ~100 行 |
+| P1 | 飞书 / Slack 入口 | 包一层 webhook 接收 NL 问题，调用现有 `route_metric → graph` | ~150 行 |
+| P1 | 多 metric 联合归因 | route_metric 输出 list，并发跑多条 graph，diagnose 节点合并 | ~200 行 |
+| P2 | 历史 case 沉淀 | Diagnose 结果归档到向量库，给后续相似 case 做经验提示（不进决策路径） | ~300 行 |
+| P2 | 反问澄清 | 路由低置信度时通过 `AskUserQuestion` 反问，避免误归因 | ~80 行 |
+| P3 | 多租户 / 权限 | State 加 `tenant_id`，工具按租户过滤数据 | 视数据源而定 |
+
+架构层面已经为这些扩展留好了接口（factory 模式工具、数据驱动 Runbook、LangGraph State），上述改造均为**替换实现**或**新增节点**，不需要重写架构。
 
 ## License
 

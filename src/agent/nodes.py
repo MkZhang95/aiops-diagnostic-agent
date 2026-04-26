@@ -13,9 +13,144 @@ from datetime import datetime
 
 from langchain_core.messages import HumanMessage, SystemMessage, ToolMessage
 
-from src.agent.prompts import DIAGNOSE_PROMPT, SYSTEM_PROMPT
+from src.agent.prompts import DIAGNOSE_PROMPT, ROUTE_METRIC_PROMPT, SYSTEM_PROMPT
+from src.agent.state import AlertEvent
 from src.knowledge.rule_matcher import RuleMatcher
 from src.knowledge.runbook_loader import ChecklistItem, RunbookLoader
+
+# ============================================================
+# Phase 0: 路由节点（NL → metric）
+# ============================================================
+
+
+ROUTE_OK = "routed"
+ROUTE_UNKNOWN = "unknown"
+ROUTE_BYPASS = "bypass"
+
+
+def make_route_metric(llm, runbook_dir: str = "runbooks"):
+    """创建 route_metric 节点 — 把用户自然语言映射到已配置的 metric。
+
+    行为：
+    - 如果 alert.metric_name 已经填了（场景模式 / Eval 回归），直接 bypass，不走 LLM
+    - 如果只有 user_query，让 LLM 在 _meta.yaml 描述的 metric 里二选一（或 null）
+    - LLM 输出必须是合法 JSON，且 metric ∈ get_available_metrics() ∪ {null}
+    - 校验失败一律视为 unknown，不重试，避免随机性污染下游 Eval
+    """
+    loader = RunbookLoader(runbook_dir)
+    model = llm.get_chat_model()
+
+    def _build_metrics_block() -> tuple[str, list[str]]:
+        metrics = loader.get_available_metrics()
+        lines = []
+        for i, m in enumerate(metrics, 1):
+            meta = loader.load_meta(m)
+            if not meta:
+                continue
+            lines.append(f"{i}. **{meta.metric}** ({meta.display_name})")
+            if meta.description:
+                lines.append(f"   - 描述: {meta.description}")
+            if meta.aliases:
+                lines.append(f"   - 用户常说: {' / '.join(meta.aliases)}")
+            if meta.symptoms:
+                lines.append("   - 典型现象:")
+                for s in meta.symptoms:
+                    lines.append(f"     · {s}")
+            if meta.not_for:
+                lines.append("   - 不适用于:")
+                for n in meta.not_for:
+                    lines.append(f"     · {n}")
+        return "\n".join(lines), metrics
+
+    def route_metric(state: dict) -> dict:
+        alert = state.get("alert")
+        user_query = state.get("user_query", "")
+
+        # 场景模式：metric_name 已经设置，跳过 LLM 路由
+        if alert and getattr(alert, "metric_name", ""):
+            return {"route_status": ROUTE_BYPASS}
+
+        if not user_query:
+            return {
+                "route_status": ROUTE_UNKNOWN,
+                "messages": [
+                    SystemMessage(content="未提供 user_query 也未提供 metric_name，无法路由。")
+                ],
+            }
+
+        metrics_block, allowed = _build_metrics_block()
+        prompt = ROUTE_METRIC_PROMPT.format(
+            metrics_block=metrics_block,
+            user_query=user_query,
+        )
+
+        response = model.invoke([HumanMessage(content=prompt)])
+        raw = (response.content or "").strip()
+        # 容错：去掉 ```json ... ``` 包裹
+        if raw.startswith("```"):
+            raw = raw.strip("`")
+            if raw.startswith("json"):
+                raw = raw[4:].strip()
+
+        try:
+            data = json.loads(raw)
+            metric = data.get("metric")
+            confidence = data.get("confidence", "low")
+            reason = data.get("reason", "")
+        except (json.JSONDecodeError, AttributeError):
+            return _route_unknown(allowed, f"LLM 输出非合法 JSON: {raw[:200]}")
+
+        # 硬校验：metric 必须 ∈ allowed 或为 None
+        if metric is not None and metric not in allowed:
+            return _route_unknown(
+                allowed,
+                f"LLM 返回了未配置的 metric: `{metric}`（reason: {reason}）",
+            )
+
+        if metric is None:
+            return _route_unknown(allowed, reason or "无匹配指标")
+
+        # 合成一个最小 AlertEvent，把 user_query 作为描述
+        meta = loader.load_meta(metric)
+        display = meta.display_name if meta else metric
+        from datetime import datetime as _dt
+
+        synth_alert = AlertEvent(
+            alert_id=f"nl_{int(_dt.now().timestamp())}",
+            metric_name=metric,
+            severity="warning",
+            description=user_query,
+            timestamp=_dt.now().isoformat(timespec="seconds"),
+            current_value=0.0,
+            baseline_value=0.0,
+            tags={"source": "nl_router"},
+        )
+
+        info = (
+            f"🧭 路由结果: 用户问题 → **{display}** ({metric})  "
+            f"置信度: {confidence}  理由: {reason}"
+        )
+        return {
+            "alert": synth_alert,
+            "route_status": ROUTE_OK,
+            "messages": [SystemMessage(content=info)],
+        }
+
+    return route_metric
+
+
+def _route_unknown(allowed: list[str], reason: str) -> dict:
+    listing = "、".join(allowed) if allowed else "（暂无任何已配置指标）"
+    msg = (
+        f"❌ 暂未配置该指标的归因 Runbook。\n"
+        f"原因: {reason}\n"
+        f"当前已支持: {listing}"
+    )
+    return {
+        "route_status": ROUTE_UNKNOWN,
+        "messages": [SystemMessage(content=msg)],
+    }
+
 
 # ============================================================
 # Phase 1: 数据采集节点
